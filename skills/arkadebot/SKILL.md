@@ -407,7 +407,7 @@ if (expiring.length > 0) {
 }
 ```
 
-**Recommended:** Use `delegateVtxos()` on startup for automatic renewal. If delegation is unavailable, fall back to `renewVtxos()` on a timer (every 6 hours, 24-hour threshold). If a VTXO expires, the only recovery path is a unilateral exit (on-chain transaction with timelock delay and higher fees).
+**Recommended:** Use `delegateVtxos()` on startup for automatic renewal (see "VTXO Renewal -- Delegation" section above). The manual approach above is only needed if delegation is unavailable. If a VTXO expires, the only recovery path is a unilateral exit (on-chain transaction with timelock delay and higher fees).
 
 ## Asset Operations (Arkade Assets)
 
@@ -436,35 +436,37 @@ Assets can only be transferred off-chain (VTXO-to-VTXO). There is no Lightning s
 
 ## Withdrawal (Collaborative Exit to L1)
 
-Move funds from Ark back to a regular Bitcoin L1 address.
+Move funds from Ark back to a regular Bitcoin L1 address. The ASP charges **200 sats per on-chain output**. Change sent back to an Ark address (offchain) is free. On-chain outputs must be at least 330 sats (dust limit).
 
 ```javascript
+const FEE_PER_OUTPUT = 200; // ASP fee per on-chain output
+const DUST_LIMIT = 330;
 const vtxos = await wallet.getVtxos();
 
-// Select VTXOs to cover withdrawal amount
+// Select VTXOs, prioritizing soonest-expiring
+const sorted = vtxos.sort((a, b) =>
+  (a.virtualStatus?.batchExpiry ?? 0) - (b.virtualStatus?.batchExpiry ?? 0)
+);
 const amountSats = 50000;
-let selected = [];
-let selectedAmount = 0;
-for (const vtxo of vtxos) {
-  if (selectedAmount >= amountSats) break;
+const minTarget = amountSats + FEE_PER_OUTPUT; // only on-chain output costs 200
+let selected = [], selectedAmount = 0;
+for (const vtxo of sorted) {
   selected.push(vtxo);
   selectedAmount += vtxo.value;
+  if (selectedAmount >= minTarget) break;
 }
 
+const change = selectedAmount - amountSats - FEE_PER_OUTPUT;
 const outputs = [{ address: "bc1q...", amount: BigInt(amountSats) }];
-
-// Return change to Ark
-const change = selectedAmount - amountSats;
-if (change > 0) {
-  const arkAddr = await wallet.getAddress();
-  outputs.push({ address: arkAddr, amount: BigInt(change) });
+if (change >= DUST_LIMIT) {
+  outputs.push({ address: await wallet.getAddress(), amount: BigInt(change) });
 }
+// else: sub-dust change is donated to fees
 
 const txid = await wallet.settle({ inputs: selected, outputs });
-console.log("Collaborative exit:", txid);
 ```
 
-**Note:** Collaborative exit requires ASP cooperation. If the ASP is offline, use unilateral exit (slower, higher fees, but trustless).
+**Note:** Collaborative exit requires ASP cooperation and VTXOs must be at least ~24 hours old (see collaborative exit cooldown above). If the ASP is offline, use unilateral exit (slower, higher fees, but trustless). See `withdraw()` in `examples/arkade-agent.js` for the full implementation.
 
 ## Message Signing
 
@@ -481,360 +483,43 @@ const pubkey = hex.encode(new Uint8Array(await wallet.identity.compressedPublicK
 
 ## Complete Agent Class
 
+The full `ArkadeAgent` class is in **`examples/arkade-agent.js`** — a single-file, production-ready agent with all capabilities:
+
+| Method | Description |
+|--------|-------------|
+| `ArkadeAgent.create(mnemonic, options)` | Static factory — sets up wallet with delegation, network defaults |
+| `getIdentity()` | Ark address + boarding address |
+| `getBalance()` | BTC balance + asset balances with metadata |
+| `getDepositAddress()` | Boarding address for on-chain deposits |
+| `transfer(address, amount)` | Off-chain Ark-to-Ark transfer |
+| `createLightningInvoice(amount, memo)` | Receive via Boltz reverse swap (min 100 sats) |
+| `payLightningInvoice(bolt11, maxFee)` | Send via Boltz submarine swap (min 333 sats) |
+| `withdraw(onchainAddress, amount)` | Collaborative exit to L1 (200 sat fee per on-chain output) |
+| `consolidateVtxos()` | Merge multiple VTXOs into one |
+| `delegateVtxos()` | Register VTXOs for automatic renewal |
+| `renewVtxos(thresholdMs)` | Manual renewal fallback |
+| `getVtxoStatus()` | VTXO expiry details |
+| `transferAssets(address, assets, amount)` | Send Arkade Assets |
+| `getAssetDetails(assetId)` | Asset metadata |
+| `fetchL402(url, options)` | Pay L402 paywalls automatically |
+| `previewL402(url)` | Check L402 cost without paying |
+| `signMessage(text)` | Schnorr signature for identity proof |
+| `getTransactionHistory()` | Transaction log |
+
+**Usage:**
+
 ```javascript
-import { Wallet, SingleKey, InMemoryWalletRepository, InMemoryContractRepository, RestDelegatorProvider } from "@arkade-os/sdk";
-import { mnemonicToSeedSync, validateMnemonic } from "@scure/bip39";
-import { wordlist } from "@scure/bip39/wordlists/english";
-import { HDKey } from "@scure/bip32";
-import { hex } from "@scure/base";
-import { decode } from "light-bolt11-decoder";
+import { ArkadeAgent } from "./examples/arkade-agent.js";
 
-const DERIVATION_PATH = "m/44'/1237'/0'";
-
-const NETWORK_DEFAULTS = {
-  bitcoin: {
-    arkServerUrl: "https://arkade.computer",
-    boltzUrl: "https://api.ark.boltz.exchange",
-    delegatorUrl: "https://delegate.arkade.money",
-  },
-  mutinynet: {
-    arkServerUrl: "https://mutinynet.arkade.sh",
-    boltzUrl: "https://api.boltz.mutinynet.arkade.sh",
-    delegatorUrl: "https://delegator.mutinynet.arkade.sh",
-  },
-  regtest: {
-    arkServerUrl: "http://localhost:7070",
-    boltzUrl: "http://localhost:9069",
-    delegatorUrl: null,
-  },
-};
-
-const VALID_NETWORKS = new Set(Object.keys(NETWORK_DEFAULTS));
-
-function deriveKeyFromMnemonic(mnemonic) {
-  if (!validateMnemonic(mnemonic, wordlist)) {
-    throw new Error("Invalid BIP39 mnemonic: checksum failed or contains invalid words");
-  }
-  const seed = mnemonicToSeedSync(mnemonic);
-  const master = HDKey.fromMasterSeed(seed);
-  const key = master.derive(DERIVATION_PATH).deriveChild(0).deriveChild(0);
-  return hex.encode(key.privateKey);
-}
-
-function validateAmount(amountSats, label = "amount") {
-  if (typeof amountSats !== "number" || !Number.isFinite(amountSats)) {
-    throw new Error(`${label} must be a finite number (got ${amountSats})`);
-  }
-  if (!Number.isInteger(amountSats) || amountSats <= 0) {
-    throw new Error(`${label} must be a positive integer (got ${amountSats})`);
-  }
-}
-
-export class ArkadeAgent {
-  #wallet;
-  #boltzUrl;
-
-  constructor(wallet, boltzUrl) {
-    this.#wallet = wallet;
-    this.#boltzUrl = boltzUrl;
-  }
-
-  static async create(mnemonic, options = {}) {
-    const network = options.network || process.env.ARK_NETWORK || "bitcoin";
-    if (!VALID_NETWORKS.has(network)) {
-      throw new Error(`Unknown network "${network}". Valid networks: ${[...VALID_NETWORKS].join(", ")}`);
-    }
-    const defaults = NETWORK_DEFAULTS[network];
-    const arkServerUrl = options.arkServerUrl || process.env.ARK_SERVER_URL || defaults.arkServerUrl;
-    const boltzUrl = options.boltzUrl || process.env.BOLTZ_URL || defaults.boltzUrl;
-    const delegatorUrl = options.delegatorUrl || process.env.ARK_DELEGATOR_URL || defaults.delegatorUrl;
-
-    if (!mnemonic) {
-      throw new Error("Mnemonic is required. Run wallet-setup.js first to generate one.");
-    }
-
-    const privateKeyHex = deriveKeyFromMnemonic(mnemonic);
-    const identity = SingleKey.fromHex(privateKeyHex);
-
-    const walletConfig = {
-      identity,
-      arkServerUrl,
-      storage: {
-        walletRepository: new InMemoryWalletRepository(),
-        contractRepository: new InMemoryContractRepository(),
-      },
-    };
-    if (delegatorUrl) {
-      walletConfig.delegatorProvider = new RestDelegatorProvider(delegatorUrl);
-    }
-
-    const wallet = await Wallet.create(walletConfig);
-
-    return new ArkadeAgent(wallet, boltzUrl);
-  }
-
-  async getIdentity() {
-    return {
-      address: await this.#wallet.getAddress(),
-      boardingAddress: await this.#wallet.getBoardingAddress(),
-    };
-  }
-
-  async getBalance() {
-    const balance = await this.#wallet.getBalance();
-    const rawAssets = balance.assets || [];
-    const assets = await Promise.all(
-      rawAssets.map(async (a) => {
-        try {
-          const details = await this.getAssetDetails(a.assetId);
-          return { ...a, ...details.metadata };
-        } catch {
-          return a;
-        }
-      }),
-    );
-    return {
-      total: balance.total.toString(),
-      offchain: (balance.offchain || 0n).toString(),
-      onchain: (balance.onchain || 0n).toString(),
-      assets,
-    };
-  }
-
-  async getAssetDetails(assetId) {
-    return await this.#wallet.assetManager.getAssetDetails(assetId);
-  }
-
-  async getDepositAddress() {
-    return await this.#wallet.getBoardingAddress();
-  }
-
-  async transfer(recipientAddress, amountSats) {
-    validateAmount(amountSats, "transfer amount");
-    return await this.#wallet.send({ address: recipientAddress, amount: amountSats });
-  }
-
-  async createLightningInvoice(amountSats, memo) {
-    validateAmount(amountSats, "invoice amount");
-    if (amountSats < 100) throw new Error(`Boltz reverse swap minimum is 100 sats (requested ${amountSats})`);
-    const response = await fetch(`${this.#boltzUrl}/v2/swap/reverse`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        from: "BTC", to: "ARK",
-        invoiceAmount: amountSats,
-        description: memo || "",
-        claimAddress: await this.#wallet.getAddress(),
-      }),
-    });
-    if (!response.ok) throw new Error(`Boltz reverse swap failed: ${await response.text()}`);
-    const swap = await response.json();
-    return { invoice: swap.invoice, swapId: swap.id, swap };
-  }
-
-  async payLightningInvoice(bolt11, maxFeeSats = 100) {
-    const decoded = decode(bolt11);
-    const amountSection = decoded.sections.find((s) => s.name === "amount");
-    if (!amountSection?.value) throw new Error("Zero-amount invoices are not supported — the invoice must specify an amount");
-    const invoiceSats = Math.ceil(Number(amountSection.value) / 1000);
-    if (invoiceSats < 333) throw new Error(`Boltz submarine swap minimum is 333 sats (invoice is ${invoiceSats})`);
-    const cpk = await this.#wallet.identity.compressedPublicKey();
-    const refundPublicKey = hex.encode(new Uint8Array(cpk));
-    const response = await fetch(`${this.#boltzUrl}/v2/swap/submarine`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ from: "ARK", to: "BTC", invoice: bolt11, refundPublicKey }),
-    });
-    if (!response.ok) throw new Error(`Boltz submarine swap failed: ${await response.text()}`);
-    const swap = await response.json();
-    const fee = swap.expectedAmount - invoiceSats;
-    if (fee > maxFeeSats) throw new Error(`Boltz swap fee ${fee} sats exceeds maxFeeSats ${maxFeeSats}`);
-    const txid = await this.#wallet.send({ address: swap.address, amount: swap.expectedAmount });
-    return { txid, swapId: swap.id, fee, swap };
-  }
-
-  async withdraw(onchainAddress, amountSats) {
-    validateAmount(amountSats, "withdrawal amount");
-    const FEE_PER_OUTPUT = 200; // ASP charges 200 sats per on-chain output
-    const DUST_LIMIT = 330; // minimum VTXO amount
-    const vtxos = await this.#wallet.getVtxos();
-    const sorted = vtxos.sort((a, b) =>
-      (a.virtualStatus?.batchExpiry ?? 0) - (b.virtualStatus?.batchExpiry ?? 0)
-    );
-    // Only the on-chain output costs 200 sats. Change to Ark address is free (offchain).
-    const minTarget = amountSats + FEE_PER_OUTPUT;
-    let selected = [], selectedAmount = 0;
-    for (const vtxo of sorted) {
-      selected.push(vtxo);
-      selectedAmount += vtxo.value;
-      if (selectedAmount >= minTarget) break;
-    }
-    if (selectedAmount < minTarget) throw new Error(`Insufficient funds: have ${selectedAmount}, need ${minTarget}`);
-    const change = selectedAmount - amountSats - FEE_PER_OUTPUT;
-    const outputs = [{ address: onchainAddress, amount: BigInt(amountSats) }];
-    if (change >= DUST_LIMIT) {
-      outputs.push({ address: await this.#wallet.getAddress(), amount: BigInt(change) });
-    }
-    return await this.#wallet.settle({ inputs: selected, outputs });
-  }
-
-  async getVtxoStatus() {
-    const vtxos = await this.#wallet.getVtxos();
-    const now = Date.now();
-    return vtxos.map((v) => ({
-      txid: v.txid, value: v.value,
-      expiresAt: v.virtualStatus?.batchExpiry,
-      expiresIn: v.virtualStatus?.batchExpiry ? v.virtualStatus.batchExpiry - now : null,
-      state: v.virtualStatus?.state,
-    }));
-  }
-
-  async delegateVtxos() {
-    const dm = await this.#wallet.getDelegatorManager();
-    if (!dm) throw new Error("Delegation not available — no delegatorUrl configured");
-    const vtxos = await this.#wallet.getVtxos();
-    if (vtxos.length === 0) return { delegated: 0, failed: 0 };
-    const destination = await this.#wallet.getAddress();
-    const result = await dm.delegate(vtxos, destination);
-    return { delegated: result.delegated.length, failed: result.failed.length };
-  }
-
-  async consolidateVtxos() {
-    const vtxos = await this.#wallet.getVtxos();
-    if (vtxos.length <= 1) return { consolidated: false, reason: "already 1 or 0 VTXOs" };
-    const beforeTotal = vtxos.reduce((sum, v) => sum + v.value, 0);
-    const txid = await this.#wallet.settle(); // merges all VTXOs into one
-    const afterVtxos = await this.#wallet.getVtxos();
-    const afterTotal = afterVtxos.reduce((sum, v) => sum + v.value, 0);
-    return { consolidated: true, txid, before: { count: vtxos.length, total: beforeTotal }, after: { count: afterVtxos.length, total: afterTotal }, feePaid: beforeTotal - afterTotal };
-  }
-
-  async renewVtxos(thresholdMs = 86400000) {
-    if (typeof thresholdMs !== "number" || !Number.isFinite(thresholdMs) || thresholdMs <= 0) {
-      throw new Error(`thresholdMs must be a positive number (got ${thresholdMs})`);
-    }
-    const vtxos = await this.#wallet.getVtxos();
-    const now = Date.now();
-    const expiring = vtxos.filter((v) =>
-      v.virtualStatus?.batchExpiry && v.virtualStatus.batchExpiry - now < thresholdMs
-    );
-    if (expiring.length === 0) return { renewed: 0 };
-    // settle() with no params auto-selects all VTXOs, sends back to self, handles fees
-    const txid = await this.#wallet.settle();
-    return { renewed: expiring.length, txid };
-  }
-
-  async transferAssets(recipientAddress, assets, amountSats = 0) {
-    if (amountSats < 0 || !Number.isFinite(amountSats)) {
-      throw new Error(`amount must be a non-negative finite number (got ${amountSats})`);
-    }
-    if (!assets || !Array.isArray(assets) || assets.length === 0) {
-      throw new Error("assets must be a non-empty array");
-    }
-    return await this.#wallet.send({ address: recipientAddress, amount: amountSats, assets });
-  }
-
-  async signMessage(text) {
-    const message = new TextEncoder().encode(text);
-    return await this.#wallet.identity.signMessage(message, "schnorr");
-  }
-
-  async getTransactionHistory() {
-    return await this.#wallet.getTransactionHistory();
-  }
-
-  async fetchL402(url, options = {}) {
-    const { method = "GET", headers = {}, body, maxFeeSats = 100 } = options;
-    const reqHeaders = { "Content-Type": "application/json", ...headers };
-    const reqBody = body ? JSON.stringify(body) : undefined;
-
-    const initialResponse = await fetch(url, { method, headers: reqHeaders, body: reqBody });
-    if (initialResponse.status !== 402) {
-      const ct = initialResponse.headers.get("content-type") || "";
-      return { paid: false, data: ct.includes("json") ? await initialResponse.json() : await initialResponse.text() };
-    }
-
-    // Parse L402 challenge (header first, body fallback)
-    let invoice, macaroon;
-    const wwwAuth = initialResponse.headers.get("www-authenticate") || "";
-    const l402Header = wwwAuth.split('L402 macaroon="')[1] || wwwAuth.split('LSAT macaroon="')[1];
-    if (l402Header) {
-      macaroon = l402Header.split('"')[0];
-      invoice = l402Header.split('invoice="')[1]?.split('"')[0];
-    }
-    if (!invoice || !macaroon) {
-      const ct = initialResponse.headers.get("content-type") || "";
-      if (ct.includes("json")) {
-        const challenge = await initialResponse.json();
-        invoice = invoice || challenge.invoice || challenge.payment_request || challenge.pr;
-        macaroon = macaroon || challenge.macaroon || challenge.token;
-      }
-    }
-    if (!invoice || !macaroon) throw new Error("Invalid L402 response: missing invoice or macaroon");
-
-    const decoded = decode(invoice);
-    const amountSection = decoded.sections.find((s) => s.name === "amount");
-    const amountSats = amountSection ? Math.ceil(Number(amountSection.value) / 1000) : 0;
-
-    // Pay via Boltz
-    const payResult = await this.payLightningInvoice(invoice, maxFeeSats);
-
-    // Poll for swap completion
-    let preimage = null;
-    for (let i = 0; i < 30; i++) {
-      await new Promise((r) => setTimeout(r, 2000));
-      const statusRes = await fetch(`${this.#boltzUrl}/v2/swap/${payResult.swapId}`);
-      if (statusRes.ok) {
-        const status = await statusRes.json();
-        if (status.status === "transaction.claimed") {
-          if (!status.preimage) throw new Error("Boltz swap claimed but no preimage returned");
-          preimage = status.preimage; break;
-        }
-        if (status.status === "transaction.failed" || status.status === "swap.expired") throw new Error(`L402 payment failed: ${status.status}`);
-      }
-    }
-    if (!preimage) throw new Error("L402 payment timed out");
-
-    const finalResponse = await fetch(url, {
-      method, headers: { ...reqHeaders, Authorization: `L402 ${macaroon}:${preimage}` }, body: reqBody,
-    });
-    const ct = finalResponse.headers.get("content-type") || "";
-    return { paid: true, amountSats, preimage, data: ct.includes("json") ? await finalResponse.json() : await finalResponse.text() };
-  }
-
-  async previewL402(url) {
-    const response = await fetch(url);
-    if (response.status !== 402) return { requiresPayment: false };
-    let invoice;
-    const wwwAuth = response.headers.get("www-authenticate") || "";
-    const l402Header = wwwAuth.split('L402 macaroon="')[1] || wwwAuth.split('LSAT macaroon="')[1];
-    if (l402Header) invoice = l402Header.split('invoice="')[1]?.split('"')[0];
-    if (!invoice) {
-      const ct = response.headers.get("content-type") || "";
-      if (ct.includes("json")) {
-        const body = await response.json();
-        invoice = body.invoice || body.payment_request || body.pr;
-      }
-    }
-    if (!invoice) return { requiresPayment: true, amountSats: null };
-    const decoded = decode(invoice);
-    const amountSection = decoded.sections.find((s) => s.name === "amount");
-    return { requiresPayment: true, amountSats: amountSection ? Math.ceil(Number(amountSection.value) / 1000) : null, invoice };
-  }
-
-  cleanup() {}
-}
-
-// Usage
-const { agent } = await ArkadeAgent.create(process.env.ARK_MNEMONIC);
-const identity = await agent.getIdentity();
-console.log("Address:", identity.address);
-
+const agent = await ArkadeAgent.create(process.env.ARK_MNEMONIC);
+const { address } = await agent.getIdentity();
 const { total } = await agent.getBalance();
-console.log("Balance:", total, "sats");
 
-agent.cleanup();
+// Delegate VTXOs on startup (recommended)
+await agent.delegateVtxos();
 ```
+
+See also: `examples/l402-paywalls.js` for a standalone L402 client with token caching.
 
 ## Error Handling
 
@@ -920,7 +605,7 @@ L402 works the same as with Spark, except the Lightning payment step goes throug
 
 ### L402 Implementation
 
-See the `fetchL402()` and `previewL402()` methods in the ArkadeAgent class above, or the standalone `examples/l402-paywalls.js` example.
+See `fetchL402()` and `previewL402()` in `examples/arkade-agent.js`, or the standalone `examples/l402-paywalls.js` for a client with domain-based token caching.
 
 ### Important: L402 Latency
 

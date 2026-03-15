@@ -234,7 +234,6 @@ export class ArkadeAgent {
       amount: swap.expectedAmount,
     });
 
-    const fee = swap.expectedAmount - amountSats;
     return { txid, swapId: swap.id, amountSats, fee, swap };
   }
 
