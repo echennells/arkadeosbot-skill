@@ -77,7 +77,6 @@ node examples/payment-flow.js
 | `ARK_NETWORK` | No | `bitcoin` (default), `mutinynet`, `regtest` |
 | `ARK_DELEGATOR_URL` | No | Delegator for auto VTXO renewal. Default: `https://delegate.arkade.money` |
 | `BOLTZ_URL` | No | Boltz API. Auto-detected from network. |
-| `ESPLORA_URL` | No | Block explorer API. Auto-detected from network. |
 
 ## Network Configuration
 

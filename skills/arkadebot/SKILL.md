@@ -607,9 +607,11 @@ L402 works the same as with Spark, except the Lightning payment step goes throug
 
 See `fetchL402()` and `previewL402()` in `examples/arkade-agent.js`, or the standalone `examples/l402-paywalls.js` for a client with domain-based token caching.
 
-### Important: L402 Latency
+### L402 Limitations
 
-Because Lightning payments go through Boltz swaps, L402 requests take longer than with Spark's native Lightning:
+**Minimum 333 sats.** L402 payments go through Boltz submarine swaps, which have a 333 sat minimum. Paywalls charging less than 333 sats cannot be paid via Arkade.
+
+**Slower than Spark.** Because Lightning payments go through Boltz swaps, L402 requests take longer:
 - **Spark L402**: ~1-3 seconds (native Lightning payment)
 - **Arkade L402**: ~10-60 seconds (Boltz submarine swap + settlement)
 
@@ -634,5 +636,4 @@ ARK_SERVER_URL=         # Arkade server URL (default: https://arkade.computer)
 ARK_NETWORK=bitcoin     # bitcoin | mutinynet | regtest
 BOLTZ_URL=              # Boltz API (auto-detected from network)
 ARK_DELEGATOR_URL=      # Delegator URL (default: https://delegate.arkade.money for mainnet)
-ESPLORA_URL=            # Block explorer API
 ```
