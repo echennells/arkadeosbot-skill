@@ -391,7 +391,8 @@ export class ArkadeAgent {
 
   async signMessage(text) {
     const message = new TextEncoder().encode(text);
-    return await this.#wallet.identity.signMessage(message, "schnorr");
+    const sig = await this.#wallet.identity.signMessage(message, "schnorr");
+    return hex.encode(new Uint8Array(sig));
   }
 
   // --- L402 Paywalls ---
@@ -593,7 +594,14 @@ async function main() {
   process.exit(0);
 }
 
-main().catch((err) => {
-  console.error("Error:", err.message);
-  process.exit(1);
-});
+// Only run demo when executed directly (not when imported as a module)
+const isDirectRun =
+  import.meta.url === `file://${process.argv[1]}` ||
+  process.argv[1]?.endsWith("arkade-agent.js");
+
+if (isDirectRun) {
+  main().catch((err) => {
+    console.error("Error:", err.message);
+    process.exit(1);
+  });
+}

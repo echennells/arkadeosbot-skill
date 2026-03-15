@@ -473,11 +473,15 @@ const txid = await wallet.settle({ inputs: selected, outputs });
 Sign messages with the wallet's identity key for proving identity or authenticating between agents.
 
 ```javascript
-// Sign
-const message = new TextEncoder().encode("I am agent-007");
-const signature = await wallet.identity.signMessage(message, "schnorr");
+// Sign (returns hex string via ArkadeAgent.signMessage())
+const signature = await agent.signMessage("I am agent-007");
 
-// Verify using the xOnly public key
+// Or using the SDK directly (returns Uint8Array, encode it yourself)
+const message = new TextEncoder().encode("I am agent-007");
+const rawSig = await wallet.identity.signMessage(message, "schnorr");
+const sigHex = hex.encode(new Uint8Array(rawSig));
+
+// Public key for verification
 const pubkey = hex.encode(new Uint8Array(await wallet.identity.compressedPublicKey()));
 ```
 
