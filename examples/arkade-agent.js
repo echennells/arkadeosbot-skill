@@ -236,6 +236,24 @@ export class ArkadeAgent {
     };
   }
 
+  /**
+   * Wait for a Lightning invoice to be paid and claim the funds.
+   * Monitors the swap via WebSocket and claims the VHTLC when payment arrives.
+   * @param pendingSwap - The pendingSwap from createLightningInvoice()
+   * @returns { txid } - The transaction ID of the claimed VHTLC
+   */
+  async waitForInvoicePayment(pendingSwap) {
+    return await this.#swaps.waitAndClaim(pendingSwap);
+  }
+
+  /**
+   * Claim a reverse swap that has already been paid (e.g. stuck at transaction.mempool).
+   * @param pendingSwap - The pendingSwap from createLightningInvoice()
+   */
+  async claimInvoicePayment(pendingSwap) {
+    await this.#swaps.claimVHTLC(pendingSwap);
+  }
+
   async payLightningInvoice(bolt11, maxFeeSats = 100) {
     const invoiceSats = getInvoiceSatoshis(bolt11);
     if (invoiceSats === 0) {
