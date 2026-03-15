@@ -2,7 +2,7 @@
   "name": "arkadebot-skill",
   "version": "0.1.0",
   "type": "module",
-  "description": "Claude Code skill for setting up Arkade (Ark protocol) Bitcoin wallet capabilities for AI agents",
+  "description": "Claude Code skill for setting up Arkade OS Bitcoin wallet capabilities for AI agents",
   "dependencies": {
     "@arkade-os/boltz-swap": "^0.3.3",
     "@arkade-os/sdk": "^0.4.4",

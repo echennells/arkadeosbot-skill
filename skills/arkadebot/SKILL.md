@@ -1,6 +1,6 @@
 ---
 name: arkadebot
-description: Set up Arkade (Ark protocol) Bitcoin wallet capabilities for AI agents. Initialize wallets from mnemonic, transfer sats and assets, create/pay Lightning invoices via Boltz swaps, pay L402 paywalls, manage VTXOs and their expiry, handle deposits and withdrawals. Use when user mentions "Arkade wallet," "Ark protocol," "Arkade Bitcoin," "VTXO," "Arkade SDK," "Arkade payment," "Arkade transfer," "boarding address," "Bitcoin L2 wallet on Ark," "agent wallet on Arkade," "Lightning," "Lightning invoice," "BOLT11," "pay invoice," "send sats," "receive sats," "Bitcoin wallet," "Bitcoin payment," "send Bitcoin," "receive Bitcoin," or wants Bitcoin/Lightning/sats capabilities for an agent.
+description: Set up Arkade OS Bitcoin wallet capabilities for AI agents. Initialize wallets from mnemonic, transfer sats and assets, create/pay Lightning invoices via Boltz swaps, pay L402 paywalls, manage VTXOs and their expiry, handle deposits and withdrawals. Use when user mentions "Arkade wallet," "Ark protocol," "Arkade Bitcoin," "VTXO," "Arkade SDK," "Arkade payment," "Arkade transfer," "boarding address," "Bitcoin L2 wallet on Ark," "agent wallet on Arkade," "Lightning," "Lightning invoice," "BOLT11," "pay invoice," "send sats," "receive sats," "Bitcoin wallet," "Bitcoin payment," "send Bitcoin," "receive Bitcoin," or wants Bitcoin/Lightning/sats capabilities for an agent.
 argument-hint: "[Optional: specify what to set up - wallet, payments, tokens, lightning, l402, vtxo-management, or full]"
 requires:
   env:

@@ -1,6 +1,6 @@
 # arkadeosbot-skill
 
-Claude Code skill for setting up Arkade (Ark protocol) Bitcoin wallet capabilities for AI agents.
+Claude Code skill for setting up Arkade OS Bitcoin wallet capabilities for AI agents.
 
 ## What is Arkade?
 
