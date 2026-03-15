@@ -10,7 +10,6 @@ import {
   InMemoryContractRepository,
   RestDelegatorProvider,
 } from "@arkade-os/sdk";
-import { ArkadeSwaps, getInvoiceSatoshis, decodeInvoice } from "@arkade-os/boltz-swap";
 import { mnemonicToSeedSync, validateMnemonic } from "@scure/bip39";
 import { wordlist } from "@scure/bip39/wordlists/english";
 import { HDKey } from "@scure/bip32";
@@ -35,55 +34,6 @@ const NETWORK_DEFAULTS = {
 
 const VALID_NETWORKS = new Set(Object.keys(NETWORK_DEFAULTS));
 
-/**
- * In-memory SwapRepository for Node.js (the default IndexedDbSwapRepository
- * only works in browsers). Swap state is ephemeral — fine for agent use
- * since swaps complete within seconds/minutes.
- */
-class InMemorySwapRepository {
-  version = 1;
-  #swaps = new Map();
-
-  async saveSwap(swap) {
-    this.#swaps.set(swap.id, { ...swap });
-  }
-
-  async deleteSwap(id) {
-    this.#swaps.delete(id);
-  }
-
-  async getAllSwaps(filter) {
-    let swaps = [...this.#swaps.values()];
-    if (filter?.id) {
-      const ids = Array.isArray(filter.id) ? filter.id : [filter.id];
-      swaps = swaps.filter((s) => ids.includes(s.id));
-    }
-    if (filter?.type) {
-      const types = Array.isArray(filter.type) ? filter.type : [filter.type];
-      swaps = swaps.filter((s) => types.includes(s.type));
-    }
-    if (filter?.status) {
-      const statuses = Array.isArray(filter.status)
-        ? filter.status
-        : [filter.status];
-      swaps = swaps.filter((s) => statuses.includes(s.status));
-    }
-    if (filter?.orderBy === "createdAt") {
-      const dir = filter.orderDirection === "desc" ? -1 : 1;
-      swaps.sort((a, b) => dir * ((a.createdAt || 0) - (b.createdAt || 0)));
-    }
-    return swaps;
-  }
-
-  async clear() {
-    this.#swaps.clear();
-  }
-
-  async [Symbol.asyncDispose]() {
-    this.#swaps.clear();
-  }
-}
-
 function deriveKeyFromMnemonic(mnemonic) {
   if (!validateMnemonic(mnemonic, wordlist)) {
     throw new Error(
@@ -107,11 +57,9 @@ function validateAmount(amountSats, label = "amount") {
 
 export class ArkadeAgent {
   #wallet;
-  #swaps;
 
-  constructor(wallet, swaps) {
+  constructor(wallet) {
     this.#wallet = wallet;
-    this.#swaps = swaps;
   }
 
   static async create(mnemonic, options = {}) {
@@ -155,14 +103,7 @@ export class ArkadeAgent {
 
     const wallet = await Wallet.create(walletConfig);
 
-    // ArkadeSwaps auto-detects the Boltz URL from the wallet's network
-    const swaps = await ArkadeSwaps.create({
-      wallet,
-      swapRepository: new InMemorySwapRepository(),
-      swapManager: false, // agent manages its own swap lifecycle
-    });
-
-    return new ArkadeAgent(wallet, swaps);
+    return new ArkadeAgent(wallet);
   }
 
   // --- Identity ---
@@ -210,83 +151,6 @@ export class ArkadeAgent {
       address: recipientAddress,
       amount: amountSats,
     });
-  }
-
-  // --- Lightning (via @arkade-os/boltz-swap) ---
-
-  async createLightningInvoice(amountSats, memo) {
-    validateAmount(amountSats, "invoice amount");
-    if (amountSats < 100) {
-      throw new Error(
-        `Boltz reverse swap minimum is 100 sats (requested ${amountSats})`,
-      );
-    }
-
-    const result = await this.#swaps.createLightningInvoice({
-      amount: amountSats,
-      description: memo || "",
-    });
-
-    return {
-      invoice: result.invoice,
-      amount: result.amount,
-      expiry: result.expiry,
-      paymentHash: result.paymentHash,
-      pendingSwap: result.pendingSwap,
-    };
-  }
-
-  /**
-   * Wait for a Lightning invoice to be paid and claim the funds.
-   * Monitors the swap via WebSocket and claims the VHTLC when payment arrives.
-   * @param pendingSwap - The pendingSwap from createLightningInvoice()
-   * @returns { txid } - The transaction ID of the claimed VHTLC
-   */
-  async waitForInvoicePayment(pendingSwap) {
-    return await this.#swaps.waitAndClaim(pendingSwap);
-  }
-
-  /**
-   * Claim a reverse swap that has already been paid (e.g. stuck at transaction.mempool).
-   * @param pendingSwap - The pendingSwap from createLightningInvoice()
-   */
-  async claimInvoicePayment(pendingSwap) {
-    await this.#swaps.claimVHTLC(pendingSwap);
-  }
-
-  async payLightningInvoice(bolt11, maxFeeSats = 100) {
-    const invoiceSats = getInvoiceSatoshis(bolt11);
-    if (invoiceSats === 0) {
-      throw new Error(
-        "Zero-amount invoices are not supported — the invoice must specify an amount",
-      );
-    }
-    if (invoiceSats < 333) {
-      throw new Error(
-        `Boltz submarine swap minimum is 333 sats (invoice is ${invoiceSats})`,
-      );
-    }
-
-    // Pre-check fees before committing funds
-    const fees = await this.#swaps.getFees();
-    const estimatedFee =
-      Math.ceil((invoiceSats * fees.percentage) / 100) +
-      (fees.minerFees?.normal || fees.minerFees || 0);
-    if (estimatedFee > maxFeeSats) {
-      throw new Error(
-        `Estimated Boltz swap fee ~${estimatedFee} sats exceeds maxFeeSats ${maxFeeSats}`,
-      );
-    }
-
-    const result = await this.#swaps.sendLightningPayment({ invoice: bolt11 });
-    const actualFee = result.amount - invoiceSats;
-
-    return {
-      txid: result.txid,
-      preimage: result.preimage,
-      amountSats: invoiceSats,
-      fee: actualFee,
-    };
   }
 
   // --- Withdrawal (Collaborative Exit to L1) ---
@@ -458,73 +322,6 @@ export class ArkadeAgent {
     return hex.encode(new Uint8Array(sig));
   }
 
-  // --- L402 Paywalls ---
-
-  /**
-   * Fetch content from an L402-protected endpoint.
-   * If 402 Payment Required, pays the invoice via Boltz and retries with the preimage.
-   */
-  async fetchL402(url, options = {}) {
-    const { method = "GET", headers = {}, body, maxFeeSats = 100 } = options;
-    const reqHeaders = { "Content-Type": "application/json", ...headers };
-    const reqBody = body ? JSON.stringify(body) : undefined;
-
-    const initialResponse = await fetch(url, {
-      method,
-      headers: reqHeaders,
-      body: reqBody,
-    });
-
-    if (initialResponse.status !== 402) {
-      const ct = initialResponse.headers.get("content-type") || "";
-      const data = ct.includes("json")
-        ? await initialResponse.json()
-        : await initialResponse.text();
-      return { paid: false, data };
-    }
-
-    // Parse L402 challenge
-    const { invoice, macaroon } = await parseL402Challenge(initialResponse);
-
-    const amountSats = getInvoiceSatoshis(invoice);
-
-    // Pay via Boltz — sendLightningPayment returns the preimage directly
-    const payResult = await this.payLightningInvoice(invoice, maxFeeSats);
-
-    // Retry with L402 authorization
-    const finalResponse = await fetch(url, {
-      method,
-      headers: {
-        ...reqHeaders,
-        Authorization: `L402 ${macaroon}:${payResult.preimage}`,
-      },
-      body: reqBody,
-    });
-
-    const ct = finalResponse.headers.get("content-type") || "";
-    const data = ct.includes("json")
-      ? await finalResponse.json()
-      : await finalResponse.text();
-
-    return { paid: true, amountSats, preimage: payResult.preimage, data };
-  }
-
-  /**
-   * Preview L402 cost without paying.
-   */
-  async previewL402(url) {
-    const response = await fetch(url);
-    if (response.status !== 402) return { requiresPayment: false };
-
-    try {
-      const { invoice } = await parseL402Challenge(response);
-      const amountSats = getInvoiceSatoshis(invoice);
-      return { requiresPayment: true, amountSats, invoice };
-    } catch {
-      return { requiresPayment: true, amountSats: null };
-    }
-  }
-
   // --- Transaction History ---
 
   async getTransactionHistory() {
@@ -533,45 +330,9 @@ export class ArkadeAgent {
 
   // --- Lifecycle ---
 
-  async cleanup() {
-    await this.#swaps.dispose();
+  cleanup() {
+    // Reserved for future resource cleanup
   }
-}
-
-/**
- * Parse an L402/LSAT challenge from a 402 response.
- * Checks WWW-Authenticate header first, then falls back to JSON body.
- * Must be awaited because the JSON body fallback is async.
- */
-async function parseL402Challenge(response) {
-  let invoice, macaroon;
-
-  const wwwAuth = response.headers.get("www-authenticate") || "";
-  const l402Header =
-    wwwAuth.split('L402 macaroon="')[1] ||
-    wwwAuth.split('LSAT macaroon="')[1];
-  if (l402Header) {
-    macaroon = l402Header.split('"')[0];
-    invoice = l402Header.split('invoice="')[1]?.split('"')[0];
-  }
-
-  if (!invoice || !macaroon) {
-    const ct = response.headers.get("content-type") || "";
-    if (ct.includes("json")) {
-      const challenge = await response.json();
-      invoice =
-        invoice || challenge.invoice || challenge.payment_request || challenge.pr;
-      macaroon = macaroon || challenge.macaroon || challenge.token;
-    }
-  }
-
-  if (!invoice || !macaroon) {
-    throw new Error(
-      "Invalid L402 response: missing invoice or macaroon",
-    );
-  }
-
-  return { invoice, macaroon };
 }
 
 // --- Demo ---
@@ -630,7 +391,7 @@ async function main() {
     console.log("Delegation unavailable:", err.message);
   }
 
-  await agent.cleanup();
+  agent.cleanup();
   process.exit(0);
 }
 

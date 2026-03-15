@@ -1,7 +1,7 @@
 ---
 name: arkadebot
-description: Set up Arkade OS Bitcoin wallet capabilities for AI agents. Initialize wallets from mnemonic, transfer sats and assets, create/pay Lightning invoices via Boltz swaps, pay L402 paywalls, manage VTXOs and their expiry, handle deposits and withdrawals. Use when user mentions "Arkade wallet," "Ark protocol," "Arkade Bitcoin," "VTXO," "Arkade SDK," "Arkade payment," "Arkade transfer," "boarding address," "Bitcoin L2 wallet on Ark," "agent wallet on Arkade," "Lightning," "Lightning invoice," "BOLT11," "pay invoice," "send sats," "receive sats," "Bitcoin wallet," "Bitcoin payment," "send Bitcoin," "receive Bitcoin," or wants Bitcoin/Lightning/sats capabilities for an agent.
-argument-hint: "[Optional: specify what to set up - wallet, payments, tokens, lightning, l402, vtxo-management, or full]"
+description: Set up Arkade OS Bitcoin wallet capabilities for AI agents. Initialize wallets from mnemonic, transfer sats and assets, manage VTXOs and their expiry, handle deposits and withdrawals. Use when user mentions "Arkade wallet," "Ark protocol," "Arkade Bitcoin," "VTXO," "Arkade SDK," "Arkade payment," "Arkade transfer," "boarding address," "Bitcoin L2 wallet on Ark," "agent wallet on Arkade," "send sats," "receive sats," "Bitcoin wallet," "Bitcoin payment," "send Bitcoin," "receive Bitcoin," or wants Bitcoin/sats capabilities for an agent.
+argument-hint: "[Optional: specify what to set up - wallet, payments, tokens, vtxo-management, or full]"
 requires:
   env:
     - name: ARK_MNEMONIC
@@ -22,9 +22,9 @@ model-invocation-reason: This skill enables agents to autonomously send and rece
 
 # Arkade (Ark Protocol) Bitcoin L2 for AI Agents
 
-You are an expert in setting up Arkade Bitcoin wallet capabilities for AI agents using `@arkade-os/sdk` and `@arkade-os/boltz-swap`.
+You are an expert in setting up Arkade Bitcoin wallet capabilities for AI agents using `@arkade-os/sdk`.
 
-Arkade is a Bitcoin Layer 2 built on the Ark protocol. It uses Virtual Transaction Outputs (VTXOs) for instant off-chain payments with batched on-chain settlement. Unlike Lightning, there are no channels to manage. Unlike Spark, VTXOs have expiry timestamps and must be renewed periodically. Lightning Network interoperability is provided through Boltz Exchange swaps. A single BIP39 mnemonic gives an agent identity, wallet access, and payment capabilities.
+Arkade is a Bitcoin Layer 2 built on the Ark protocol. It uses Virtual Transaction Outputs (VTXOs) for instant off-chain payments with batched on-chain settlement. Unlike Lightning, there are no channels to manage. Unlike Spark, VTXOs have expiry timestamps and must be renewed periodically. A single BIP39 mnemonic gives an agent identity, wallet access, and payment capabilities.
 
 ## For Production Use
 
@@ -92,7 +92,7 @@ Ark is a Bitcoin scaling protocol that uses:
 | Self-custody | Yes (mnemonic) | Yes (mnemonic) | Varies | Yes |
 | Channels | Not required | Not required | Required | N/A |
 | Coin expiry | VTXOs expire (~30 days) | No expiry | Channel lifetime | No expiry |
-| Lightning | Via Boltz swaps | Built-in | Native | N/A |
+| Lightning | Not included (stateful) | Built-in | Native | N/A |
 | Setup | Mnemonic + ASP URL | Mnemonic only | Node or hosted | Keys only |
 
 ### Fee Structure
@@ -100,15 +100,11 @@ Ark is a Bitcoin scaling protocol that uses:
 | Operation | Fee |
 |-----------|-----|
 | **Off-chain transfer (Ark-to-Ark)** | Free (offchain inputs/outputs currently 0 sats) |
-| **Lightning receive (via Boltz)** | ~0.1% + 19 sats miner fee. **Min 100 sats, max 25M sats** |
-| **Lightning send (via Boltz)** | ~0.1% + miner fee. **Min 333 sats, max ~2M sats** |
 | **L1 deposit (boarding)** | On-chain tx fee (paid by user) |
 | **Collaborative exit to L1** | 200 sats per on-chain output (set by ASP). Offchain change outputs are free. |
 | **Unilateral exit to L1** | On-chain tx fee (user pays, higher than collaborative) |
 
-**Boltz swap limits:** Lightning payments via Boltz have minimum amounts. Receiving requires at least 100 sats; sending requires at least 333 sats. Maximum is ~2,000,001 sats per swap.
-
-**Collaborative exit cooldown:** VTXOs must be at least ~24 hours old before they can be used in a `settle()` (collaborative exit to L1). The ASP enforces a `minExpiryGap` of ~696 hours — since VTXOs have a ~720 hour (~30 day) lifetime, they need ~24 hours to age past this threshold. This does NOT affect Ark-to-Ark transfers, Lightning payments, or any other operation — only on-chain exits.
+**Collaborative exit cooldown:** VTXOs must be at least ~24 hours old before they can be used in a `settle()` (collaborative exit to L1). The ASP enforces a `minExpiryGap` of ~696 hours — since VTXOs have a ~720 hour (~30 day) lifetime, they need ~24 hours to age past this threshold. This does NOT affect Ark-to-Ark transfers or any other operation — only on-chain exits.
 
 **On-chain dust limit:** On-chain outputs must be at least 330 sats (`utxoMinAmount`). If withdraw change would be below this, it is donated to fees.
 
@@ -147,7 +143,6 @@ Ark is a Bitcoin scaling protocol that uses:
 
 - **ASP liveness dependency** -- If the ASP goes offline, off-chain payments halt until recovery
 - **Batch timing** -- Transactions participate in ASP batch cycles, not individually instant
-- **Lightning is indirect** -- Lightning payments require Boltz swaps (adds latency and fees vs native)
 - **Boarding timelock** -- On-chain deposits take time to become fully available as VTXOs
 
 ## Tools Available
@@ -155,13 +150,11 @@ Ark is a Bitcoin scaling protocol that uses:
 | Tool | Purpose |
 |------|---------|
 | @arkade-os/sdk | TypeScript wallet SDK for Ark protocol |
-| @arkade-os/boltz-swap | Lightning integration via Boltz Exchange |
-| Boltz Exchange | Submarine/reverse swap provider |
 
 ## Required Libraries
 
 ```bash
-npm install @arkade-os/sdk@^0.4.4 @arkade-os/boltz-swap@^0.3.3 @scure/bip32 @scure/bip39 @scure/base dotenv eventsource
+npm install @arkade-os/sdk@^0.4.4 @scure/bip32 @scure/bip39 @scure/base dotenv eventsource
 ```
 
 Multiple dependencies because key derivation is handled externally (unlike Spark SDK which bundles BIP39 internally).
@@ -305,52 +298,6 @@ for (const tx of txs) {
 }
 ```
 
-## Lightning Interop (via @arkade-os/boltz-swap)
-
-Arkade does not have native Lightning support. All Lightning operations go through Boltz Exchange swaps via the `@arkade-os/boltz-swap` package, which handles preimage generation, key management, VHTLC construction, and swap monitoring automatically.
-
-### Create Lightning Invoice (Receive via Reverse Swap)
-
-```javascript
-import { ArkadeSwaps } from "@arkade-os/boltz-swap";
-
-const swaps = await ArkadeSwaps.create({ wallet });
-const result = await swaps.createLightningInvoice({
-  amount: 1000,                        // satoshis
-  description: "Payment for AI service",
-});
-
-console.log("BOLT11:", result.invoice);        // Share with payer
-console.log("Amount:", result.amount, "sats"); // After Boltz fees
-console.log("Expires:", new Date(result.expiry * 1000));
-```
-
-How it works: Boltz creates a Lightning invoice. When the payer pays it, Boltz sends the equivalent amount to your Ark address as a VTXO. The `@arkade-os/boltz-swap` package handles preimage hashing and claim key generation automatically.
-
-### Pay Lightning Invoice (Send via Submarine Swap)
-
-```javascript
-const result = await swaps.sendLightningPayment({
-  invoice: "lnbc...",  // BOLT11 invoice to pay
-});
-
-console.log("Paid:", result.txid);
-console.log("Preimage:", result.preimage);  // Proof of payment
-console.log("Amount sent:", result.amount, "sats");
-```
-
-How it works: The package creates a submarine swap, sends VTXOs to Boltz, and returns the payment preimage once Boltz pays the Lightning invoice. No manual polling needed.
-
-### Invoice Utilities
-
-```javascript
-import { getInvoiceSatoshis, decodeInvoice } from "@arkade-os/boltz-swap";
-
-const sats = getInvoiceSatoshis("lnbc...");
-const decoded = decodeInvoice("lnbc...");
-// decoded: { amountSats, expiry, description, paymentHash }
-```
-
 ## VTXO Management
 
 ### Check VTXO Expiry Status
@@ -478,8 +425,6 @@ The full `ArkadeAgent` class is in **`examples/arkade-agent.js`** — a single-f
 | `getBalance()` | BTC balance + asset balances with metadata |
 | `getDepositAddress()` | Boarding address for on-chain deposits |
 | `transfer(address, amount)` | Off-chain Ark-to-Ark transfer |
-| `createLightningInvoice(amount, memo)` | Receive via Boltz reverse swap (min 100 sats) |
-| `payLightningInvoice(bolt11, maxFee)` | Send via Boltz submarine swap (min 333 sats) |
 | `withdraw(onchainAddress, amount)` | Collaborative exit to L1 (200 sat fee per on-chain output) |
 | `consolidateVtxos()` | Merge multiple VTXOs into one |
 | `delegateVtxos()` | Register VTXOs for automatic renewal |
@@ -487,10 +432,16 @@ The full `ArkadeAgent` class is in **`examples/arkade-agent.js`** — a single-f
 | `getVtxoStatus()` | VTXO expiry details |
 | `transferAssets(address, assets, amount)` | Send Arkade Assets |
 | `getAssetDetails(assetId)` | Asset metadata |
-| `fetchL402(url, options)` | Pay L402 paywalls automatically |
-| `previewL402(url)` | Check L402 cost without paying |
 | `signMessage(text)` | Schnorr signature for identity proof |
 | `getTransactionHistory()` | Transaction log |
+
+**Lightning is not included.** Arkade supports Lightning via Boltz Exchange swaps (`@arkade-os/boltz-swap`), but the swap lifecycle is stateful and not suitable for an agent skill:
+
+- **Receiving** requires generating a preimage and claim keypair, monitoring a WebSocket for payment, then constructing and broadcasting a VHTLC claim transaction before a timeout expires.
+- **Sending** blocks while the swap settles through Boltz's submarine swap flow, requiring the agent to stay online and poll for completion.
+- Both paths require persistent state tracking across multiple asynchronous steps. If the agent crashes or restarts mid-swap, funds can be lost or stuck.
+
+If you need Lightning, consider [sparkbtcbot-skill](https://github.com/echennells/sparkbtcbot-skill) which has built-in stateless Lightning support via Spark's native integration. Alternatively, use `@arkade-os/boltz-swap` directly in a long-running process with proper swap state persistence (e.g., a database-backed `SwapRepository`).
 
 **Usage:**
 
@@ -504,8 +455,6 @@ const { total } = await agent.getBalance();
 // Delegate VTXOs on startup (recommended)
 await agent.delegateVtxos();
 ```
-
-See also: `examples/l402-paywalls.js` for a standalone L402 client with token caching.
 
 ## Error Handling
 
@@ -531,7 +480,6 @@ Common error scenarios:
 - **Invalid address** -- Malformed Ark address
 - **VTXO expired** -- Attempting to spend an expired VTXO (renew first)
 - **Batch timing** -- ASP not currently accepting intents (wait for next batch window)
-- **Boltz swap failure** -- Swap expired, insufficient liquidity, or network issues
 
 ## Security Best Practices
 
@@ -576,40 +524,13 @@ If VTXOs expire, funds require an on-chain unilateral exit:
 4. **Implement spending controls** in your agent logic (per-tx caps, daily budgets)
 5. **Monitor transaction history** for unexpected outgoing activity
 
-## L402 Protocol (Lightning Paywalls)
-
-L402 works the same as with Spark, except the Lightning payment step goes through a Boltz submarine swap instead of a native SDK call. This adds latency (~10-60 seconds for swap completion) but is functionally equivalent.
-
-### How L402 Works with Arkade
-
-1. **Request** -- Client fetches protected URL
-2. **402 Response** -- Server returns invoice + macaroon
-3. **Boltz Submarine Swap** -- Client creates swap, sends VTXOs to Boltz, Boltz pays the Lightning invoice
-4. **Get Preimage** -- Poll Boltz swap status for the payment preimage
-5. **Retry with Auth** -- Client retries with `Authorization: L402 <macaroon>:<preimage>`
-6. **200 Response** -- Server returns protected content
-
-### L402 Implementation
-
-See `fetchL402()` and `previewL402()` in `examples/arkade-agent.js`, or the standalone `examples/l402-paywalls.js` for a client with domain-based token caching.
-
-### L402 Limitations
-
-**Minimum 333 sats.** L402 payments go through Boltz submarine swaps, which have a 333 sat minimum. Paywalls charging less than 333 sats cannot be paid via Arkade.
-
-**Slower than Spark.** Because Lightning payments go through Boltz swaps, L402 requests take longer:
-- **Spark L402**: ~1-3 seconds (native Lightning payment)
-- **Arkade L402**: ~10-60 seconds (Boltz submarine swap + settlement)
-
-Cache L402 tokens by domain to avoid paying for repeat requests.
-
 ## Network Configuration
 
-| Network | ARK Server | Boltz API | Delegator | Notes |
-|---------|-----------|-----------|-----------|-------|
-| bitcoin | `https://arkade.computer` | `https://api.ark.boltz.exchange` | `https://delegate.arkade.money` | Production mainnet |
-| mutinynet | `https://mutinynet.arkade.sh` | `https://api.boltz.mutinynet.arkade.sh` | `https://delegator.mutinynet.arkade.sh` | Testing |
-| regtest | `http://localhost:7070` | `http://localhost:9069` | N/A | Local development |
+| Network | ARK Server | Delegator | Notes |
+|---------|-----------|-----------|-------|
+| bitcoin | `https://arkade.computer` | `https://delegate.arkade.money` | Production mainnet |
+| mutinynet | `https://mutinynet.arkade.sh` | `https://delegator.mutinynet.arkade.sh` | Testing |
+| regtest | `http://localhost:7070` | N/A | Local development |
 
 ## Environment Variables
 
@@ -620,6 +541,5 @@ ARK_SERVER_URL=         # Arkade server URL (default: https://arkade.computer)
 
 # Optional
 ARK_NETWORK=bitcoin     # bitcoin | mutinynet | regtest
-BOLTZ_URL=              # Boltz API (auto-detected from network)
 ARK_DELEGATOR_URL=      # Delegator URL (default: https://delegate.arkade.money for mainnet)
 ```

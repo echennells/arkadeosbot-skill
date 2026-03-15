@@ -4,7 +4,6 @@
   "type": "module",
   "description": "Claude Code skill for setting up Arkade OS Bitcoin wallet capabilities for AI agents",
   "dependencies": {
-    "@arkade-os/boltz-swap": "^0.3.3",
     "@arkade-os/sdk": "^0.4.4",
     "@scure/base": "^1.2.4",
     "@scure/bip32": "^1.6.2",
@@ -15,9 +14,7 @@
   "scripts": {
     "example:setup": "node examples/wallet-setup.js",
     "example:balance": "node examples/balance-and-deposits.js",
-    "example:payments": "node examples/payment-flow.js",
     "example:tokens": "node examples/token-operations.js",
-    "example:agent": "node examples/arkade-agent.js",
-    "example:l402": "node examples/l402-paywalls.js"
+    "example:agent": "node examples/arkade-agent.js"
   }
 }

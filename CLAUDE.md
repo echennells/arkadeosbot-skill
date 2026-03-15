@@ -12,11 +12,10 @@ Teaches Claude Code how to give AI agents Bitcoin capabilities using the Ark pro
 2. **Check Balance** -- Query BTC and asset balances
 3. **Receive Deposits** -- Generate boarding addresses for on-chain Bitcoin deposits
 4. **Transfer BTC** -- Off-chain VTXO-to-VTXO transfers via Ark protocol
-5. **Lightning Invoices** -- Create and pay BOLT11 invoices via Boltz swaps
-6. **Asset Operations** -- Transfer Arkade Assets (native colored coins)
-7. **Withdraw to L1** -- Collaborative exit back to on-chain Bitcoin
-8. **Message Signing** -- Sign and verify messages for identity proof
-9. **VTXO Management** -- Renew expiring VTXOs, check expiry status
+5. **Asset Operations** -- Transfer Arkade Assets (native colored coins)
+6. **Withdraw to L1** -- Collaborative exit back to on-chain Bitcoin
+7. **Message Signing** -- Sign and verify messages for identity proof
+8. **VTXO Management** -- Renew expiring VTXOs, check expiry status
 
 ## Structure
 
@@ -27,21 +26,19 @@ skills/
 examples/
   wallet-setup.js         # Generate/import wallet
   balance-and-deposits.js # Balance + deposit addresses
-  payment-flow.js         # Lightning + Ark payments
   token-operations.js     # Arkade Asset operations
   arkade-agent.js         # Complete ArkadeAgent class
-  l402-paywalls.js        # L402 paywall client
 .env.example              # Environment variable template
 ```
 
 ## Trigger Phrases
 
-Activates when user mentions: "Arkade wallet", "Ark protocol", "Arkade Bitcoin", "VTXO", "Arkade SDK", "Arkade payment", "Arkade transfer", "boarding address", "Bitcoin L2 wallet on Ark", "agent wallet on Arkade", "Lightning", "Lightning invoice", "BOLT11", "pay invoice", "send sats", "receive sats", "Bitcoin wallet", "Bitcoin payment", "send Bitcoin", "receive Bitcoin"
+Activates when user mentions: "Arkade wallet", "Ark protocol", "Arkade Bitcoin", "VTXO", "Arkade SDK", "Arkade payment", "Arkade transfer", "boarding address", "Bitcoin L2 wallet on Ark", "agent wallet on Arkade", "send sats", "receive sats", "Bitcoin wallet", "Bitcoin payment", "send Bitcoin", "receive Bitcoin"
 
 ## Dependencies
 
 ```bash
-npm install @arkade-os/sdk @arkade-os/boltz-swap @scure/bip32 @scure/bip39 @scure/base dotenv eventsource
+npm install @arkade-os/sdk @scure/bip32 @scure/bip39 @scure/base dotenv eventsource
 ```
 
 ## Environment Variables
