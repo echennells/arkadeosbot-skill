@@ -41,7 +41,7 @@ Activates when user mentions: "Arkade wallet", "Ark protocol", "Arkade Bitcoin",
 ## Dependencies
 
 ```bash
-npm install @arkade-os/sdk @arkade-os/boltz-swap @scure/bip32 @scure/bip39 @scure/base dotenv
+npm install @arkade-os/sdk @arkade-os/boltz-swap @scure/bip32 @scure/bip39 @scure/base dotenv eventsource
 ```
 
 ## Environment Variables

@@ -305,68 +305,50 @@ for (const tx of txs) {
 }
 ```
 
-## Lightning Interop (via Boltz)
+## Lightning Interop (via @arkade-os/boltz-swap)
 
-Arkade does not have native Lightning support. All Lightning operations go through Boltz Exchange swaps. This adds latency and swap fees compared to Spark's native Lightning, but provides full BOLT11 compatibility.
+Arkade does not have native Lightning support. All Lightning operations go through Boltz Exchange swaps via the `@arkade-os/boltz-swap` package, which handles preimage generation, key management, VHTLC construction, and swap monitoring automatically.
 
 ### Create Lightning Invoice (Receive via Reverse Swap)
 
 ```javascript
-const boltzUrl = process.env.BOLTZ_URL || "https://api.ark.boltz.exchange";
-const arkAddress = await wallet.getAddress();
+import { ArkadeSwaps } from "@arkade-os/boltz-swap";
 
-const response = await fetch(`${boltzUrl}/v2/swap/reverse`, {
-  method: "POST",
-  headers: { "Content-Type": "application/json" },
-  body: JSON.stringify({
-    from: "BTC",
-    to: "ARK",
-    invoiceAmount: 1000,
-    description: "Payment for AI service",
-    claimAddress: arkAddress,
-  }),
+const swaps = await ArkadeSwaps.create({ wallet });
+const result = await swaps.createLightningInvoice({
+  amount: 1000,                        // satoshis
+  description: "Payment for AI service",
 });
 
-const swap = await response.json();
-console.log("BOLT11:", swap.invoice);  // Share this with the payer
-console.log("Swap ID:", swap.id);      // Monitor swap status
+console.log("BOLT11:", result.invoice);        // Share with payer
+console.log("Amount:", result.amount, "sats"); // After Boltz fees
+console.log("Expires:", new Date(result.expiry * 1000));
 ```
 
-How it works: Boltz creates a Lightning invoice. When the payer pays it, Boltz sends the equivalent amount to your Ark address as a VTXO.
+How it works: Boltz creates a Lightning invoice. When the payer pays it, Boltz sends the equivalent amount to your Ark address as a VTXO. The `@arkade-os/boltz-swap` package handles preimage hashing and claim key generation automatically.
 
 ### Pay Lightning Invoice (Send via Submarine Swap)
 
 ```javascript
-const response = await fetch(`${boltzUrl}/v2/swap/submarine`, {
-  method: "POST",
-  headers: { "Content-Type": "application/json" },
-  body: JSON.stringify({
-    from: "ARK",
-    to: "BTC",
-    invoice: "lnbc...",  // BOLT11 invoice to pay
-  }),
+const result = await swaps.sendLightningPayment({
+  invoice: "lnbc...",  // BOLT11 invoice to pay
 });
 
-const swap = await response.json();
-
-// Send VTXOs to Boltz swap address
-const txid = await wallet.send({
-  address: swap.address,
-  amount: swap.expectedAmount,
-});
-console.log("Submarine swap sent:", txid);
+console.log("Paid:", result.txid);
+console.log("Preimage:", result.preimage);  // Proof of payment
+console.log("Amount sent:", result.amount, "sats");
 ```
 
-How it works: You send VTXOs to Boltz's swap address. Boltz pays the Lightning invoice on your behalf.
+How it works: The package creates a submarine swap, sends VTXOs to Boltz, and returns the payment preimage once Boltz pays the Lightning invoice. No manual polling needed.
 
-### Monitor Swap Status
+### Invoice Utilities
 
 ```javascript
-const statusRes = await fetch(`${boltzUrl}/v2/swap/${swapId}`);
-const status = await statusRes.json();
-console.log("Swap status:", status.status);
-// Possible: "swap.created", "transaction.mempool", "transaction.confirmed",
-//           "transaction.claimed", "transaction.failed", "swap.expired"
+import { getInvoiceSatoshis, decodeInvoice } from "@arkade-os/boltz-swap";
+
+const sats = getInvoiceSatoshis("lnbc...");
+const decoded = decodeInvoice("lnbc...");
+// decoded: { amountSats, expiry, description, paymentHash }
 ```
 
 ## VTXO Management

@@ -9,11 +9,11 @@ import {
   InMemoryWalletRepository,
   InMemoryContractRepository,
 } from "@arkade-os/sdk";
+import { ArkadeSwaps, getInvoiceSatoshis } from "@arkade-os/boltz-swap";
 import { mnemonicToSeedSync, validateMnemonic } from "@scure/bip39";
 import { wordlist } from "@scure/bip39/wordlists/english";
 import { HDKey } from "@scure/bip32";
 import { hex } from "@scure/base";
-import { decode } from "light-bolt11-decoder";
 
 const DERIVATION_PATH = "m/44'/1237'/0'";
 
@@ -24,8 +24,6 @@ if (!process.env.ARK_MNEMONIC) {
 
 const arkServerUrl =
   process.env.ARK_SERVER_URL || "https://arkade.computer";
-const boltzUrl =
-  process.env.BOLTZ_URL || "https://api.ark.boltz.exchange";
 
 // L402 token cache -- keyed by domain so tokens are reused across endpoints
 const tokenCache = new Map();
@@ -38,6 +36,34 @@ function deriveKeyFromMnemonic(mnemonic) {
   const master = HDKey.fromMasterSeed(seed);
   const key = master.derive(DERIVATION_PATH).deriveChild(0).deriveChild(0);
   return hex.encode(key.privateKey);
+}
+
+/**
+ * In-memory SwapRepository for Node.js (IndexedDbSwapRepository is browser-only).
+ */
+class InMemorySwapRepository {
+  version = 1;
+  #swaps = new Map();
+  async saveSwap(swap) { this.#swaps.set(swap.id, { ...swap }); }
+  async deleteSwap(id) { this.#swaps.delete(id); }
+  async getAllSwaps(filter) {
+    let swaps = [...this.#swaps.values()];
+    if (filter?.id) {
+      const ids = Array.isArray(filter.id) ? filter.id : [filter.id];
+      swaps = swaps.filter((s) => ids.includes(s.id));
+    }
+    if (filter?.type) {
+      const types = Array.isArray(filter.type) ? filter.type : [filter.type];
+      swaps = swaps.filter((s) => types.includes(s.type));
+    }
+    if (filter?.status) {
+      const statuses = Array.isArray(filter.status) ? filter.status : [filter.status];
+      swaps = swaps.filter((s) => statuses.includes(s.status));
+    }
+    return swaps;
+  }
+  async clear() { this.#swaps.clear(); }
+  async [Symbol.asyncDispose]() { this.#swaps.clear(); }
 }
 
 /**
@@ -78,40 +104,10 @@ async function parseChallenge(response) {
 }
 
 /**
- * Pay a Lightning invoice via Boltz submarine swap.
- * Returns the swap info for monitoring.
- */
-async function payViaSubmarine(wallet, invoice) {
-  const subRes = await fetch(`${boltzUrl}/v2/swap/submarine`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      from: "ARK",
-      to: "BTC",
-      invoice,
-    }),
-  });
-
-  if (!subRes.ok) {
-    throw new Error(`Boltz submarine swap failed: ${await subRes.text()}`);
-  }
-
-  const swap = await subRes.json();
-
-  // Send VTXOs to swap address
-  await wallet.send({
-    address: swap.address,
-    amount: swap.expectedAmount,
-  });
-
-  return swap;
-}
-
-/**
  * Fetch content from an L402-protected endpoint.
  * If 402 Payment Required, pays via Boltz submarine swap and retries.
  */
-async function fetchWithL402(wallet, url, options = {}) {
+async function fetchWithL402(swaps, url, options = {}) {
   const { method = "GET", headers = {}, body } = options;
   const domain = new URL(url).host;
   const reqHeaders = { "Content-Type": "application/json", ...headers };
@@ -161,54 +157,25 @@ async function fetchWithL402(wallet, url, options = {}) {
   const { invoice, macaroon } = await parseChallenge(initialResponse);
 
   // Step 3: Decode invoice amount
-  const decoded = decode(invoice);
-  const amountSection = decoded.sections.find((s) => s.name === "amount");
-  if (!amountSection?.value) {
+  const amountSats = getInvoiceSatoshis(invoice);
+  if (amountSats === 0) {
     throw new Error("L402 invoice has no amount");
   }
-  const amountSats = Math.ceil(Number(amountSection.value) / 1000);
   console.log(`Invoice amount: ${amountSats} sats`);
 
-  // Step 4: Pay via Boltz submarine swap
+  // Step 4: Pay via Boltz — sendLightningPayment returns preimage directly
   console.log("Paying invoice via Boltz submarine swap...");
-  const swap = await payViaSubmarine(wallet, invoice);
+  const result = await swaps.sendLightningPayment({ invoice });
 
-  // Step 5: Poll for swap completion and preimage
-  let preimage = null;
-  for (let i = 0; i < 30; i++) {
-    await new Promise((r) => setTimeout(r, 2000));
-    const statusRes = await fetch(`${boltzUrl}/v2/swap/${swap.id}`);
-    if (statusRes.ok) {
-      const status = await statusRes.json();
-      if (status.status === "transaction.claimed") {
-        if (!status.preimage) {
-          throw new Error("Boltz swap claimed but no preimage returned");
-        }
-        preimage = status.preimage;
-        break;
-      }
-      if (
-        status.status === "transaction.failed" ||
-        status.status === "swap.expired"
-      ) {
-        throw new Error(`L402 payment failed: ${status.status}`);
-      }
-    }
-  }
+  console.log("Payment complete, preimage:", result.preimage.slice(0, 16) + "...");
 
-  if (!preimage) {
-    throw new Error("L402 payment timed out");
-  }
-
-  console.log("Payment complete, preimage:", preimage.slice(0, 16) + "...");
-
-  // Step 6: Retry with L402 authorization
+  // Step 5: Retry with L402 authorization
   console.log("Fetching protected content...");
   const finalResponse = await fetch(url, {
     method,
     headers: {
       ...reqHeaders,
-      Authorization: `L402 ${macaroon}:${preimage}`,
+      Authorization: `L402 ${macaroon}:${result.preimage}`,
     },
     body: reqBody,
   });
@@ -219,9 +186,9 @@ async function fetchWithL402(wallet, url, options = {}) {
     : await finalResponse.text();
 
   // Cache token
-  tokenCache.set(domain, { macaroon, preimage });
+  tokenCache.set(domain, { macaroon, preimage: result.preimage });
 
-  return { paid: true, amountSats, preimage, macaroon, data };
+  return { paid: true, amountSats, preimage: result.preimage, macaroon, data };
 }
 
 /**
@@ -234,9 +201,7 @@ async function previewL402(url) {
   }
 
   const { invoice } = await parseChallenge(response);
-  const decoded = decode(invoice);
-  const amountSection = decoded.sections.find((s) => s.name === "amount");
-  const amountSats = Math.ceil(Number(amountSection.value) / 1000);
+  const amountSats = getInvoiceSatoshis(invoice);
 
   return { requiresPayment: true, amountSats, invoice };
 }
@@ -252,6 +217,13 @@ async function main() {
       walletRepository: new InMemoryWalletRepository(),
       contractRepository: new InMemoryContractRepository(),
     },
+  });
+
+  // ArkadeSwaps handles Boltz integration (keys, preimages, signing)
+  const swaps = await ArkadeSwaps.create({
+    wallet,
+    swapRepository: new InMemorySwapRepository(),
+    swapManager: false,
   });
 
   const balance = await wallet.getBalance();
@@ -274,16 +246,18 @@ async function main() {
   // Uncomment to actually pay and fetch:
   //
   // console.log("=== Fetch with L402 Payment ===");
-  // const result = await fetchWithL402(wallet, L402_TEST_URL);
+  // const result = await fetchWithL402(swaps, L402_TEST_URL);
   // console.log("Paid:", result.paid);
   // if (result.amountSats) console.log("Amount:", result.amountSats, "sats");
   // console.log("Data:", result.data);
   //
   // // Second request reuses the cached token
   // console.log("\n=== Fetch Again (cached token) ===");
-  // const result2 = await fetchWithL402(wallet, "https://tassandra.laisee.org/price/EUR");
+  // const result2 = await fetchWithL402(swaps, "https://tassandra.laisee.org/price/EUR");
   // console.log("Paid:", result2.paid, "Cached:", result2.cached);
   // console.log("Data:", result2.data);
+
+  await swaps.dispose();
   process.exit(0);
 }
 

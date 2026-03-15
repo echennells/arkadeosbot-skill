@@ -10,8 +10,7 @@
     "@scure/bip32": "^1.6.2",
     "@scure/bip39": "^1.5.4",
     "dotenv": "^16.4.7",
-    "eventsource": "4.1.0",
-    "light-bolt11-decoder": "^3.2.0"
+    "eventsource": "4.1.0"
   },
   "scripts": {
     "example:setup": "node examples/wallet-setup.js",

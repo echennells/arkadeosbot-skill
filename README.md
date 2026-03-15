@@ -89,7 +89,7 @@ node examples/payment-flow.js
 ## Dependencies
 
 ```bash
-npm install @arkade-os/sdk @arkade-os/boltz-swap @scure/bip32 @scure/bip39 @scure/base dotenv eventsource light-bolt11-decoder
+npm install @arkade-os/sdk @arkade-os/boltz-swap @scure/bip32 @scure/bip39 @scure/base dotenv eventsource
 ```
 
 ## Security
