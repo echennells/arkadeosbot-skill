@@ -4,3 +4,7 @@ node_modules/
 .env.new
 .devcontainer/
 .supply-chain-risk-auditor/
+research/
+static_analysis_semgrep_1/
+check-*.js
+scan-*.js
