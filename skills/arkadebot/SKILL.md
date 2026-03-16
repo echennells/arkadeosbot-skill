@@ -246,6 +246,8 @@ console.log("Balance:", balance.total.toString(), "sats");
 
 ### Check Balance
 
+When checking balances on an unknown or previously-used mnemonic, scan all address variants (with and without delegation) since you may not know how the wallet was originally configured.
+
 ```javascript
 const balance = await wallet.getBalance();
 console.log("Total:", balance.total.toString(), "sats");
