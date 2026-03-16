@@ -6,6 +6,7 @@ if (typeof globalThis.EventSource === "undefined") {
 import {
   Wallet,
   SingleKey,
+  MnemonicIdentity,
   InMemoryWalletRepository,
   InMemoryContractRepository,
   RestDelegatorProvider,
@@ -15,7 +16,7 @@ import { wordlist } from "@scure/bip39/wordlists/english";
 import { HDKey } from "@scure/bip32";
 import { hex } from "@scure/base";
 
-const DERIVATION_PATH = "m/44'/1237'/0'";
+const LEGACY_DERIVATION_PATH = "m/44'/1237'/0'";
 
 const NETWORK_DEFAULTS = {
   bitcoin: {
@@ -34,32 +35,67 @@ const NETWORK_DEFAULTS = {
 
 const VALID_NETWORKS = new Set(Object.keys(NETWORK_DEFAULTS));
 
-function deriveKeyFromMnemonic(mnemonic) {
-  if (!validateMnemonic(mnemonic, wordlist)) {
-    throw new Error(
-      "Invalid BIP39 mnemonic: checksum failed or contains invalid words",
-    );
-  }
+/**
+ * Derive a private key using the legacy m/44'/1237'/0' path.
+ * Only used for fallback scanning of wallets created by older bot versions
+ * or the arkade.money web wallet.
+ */
+function deriveLegacyKey(mnemonic) {
   const seed = mnemonicToSeedSync(mnemonic);
   const master = HDKey.fromMasterSeed(seed);
-  const key = master.derive(DERIVATION_PATH).deriveChild(0).deriveChild(0);
+  const key = master.derive(LEGACY_DERIVATION_PATH).deriveChild(0).deriveChild(0);
   return hex.encode(key.privateKey);
 }
 
-function validateAmount(amountSats, label = "amount") {
+// 1 BTC in sats — amounts above this trigger a warning (likely unit confusion)
+const HIGH_AMOUNT_THRESHOLD_SATS = 100_000_000;
+
+function validateAmount(amountSats, label = "amount", { allowZero = false } = {}) {
   if (typeof amountSats !== "number" || !Number.isFinite(amountSats)) {
     throw new Error(`${label} must be a finite number (got ${amountSats})`);
   }
-  if (!Number.isInteger(amountSats) || amountSats <= 0) {
-    throw new Error(`${label} must be a positive integer (got ${amountSats})`);
+  const minValue = allowZero ? 0 : 1;
+  if (!Number.isInteger(amountSats) || amountSats < minValue) {
+    throw new Error(
+      `${label} must be a ${allowZero ? "non-negative" : "positive"} integer (got ${amountSats})`,
+    );
+  }
+  if (amountSats > HIGH_AMOUNT_THRESHOLD_SATS) {
+    console.warn(
+      `Warning: ${label} is ${amountSats} sats (${(amountSats / 1e8).toFixed(8)} BTC). ` +
+      "Ensure this is in satoshis, not BTC."
+    );
+  }
+}
+
+// Ark addresses start with ark1 (mainnet) or tark1 (testnet/regtest)
+const ARK_ADDRESS_RE = /^t?ark1[a-z0-9]+$/;
+// Bitcoin L1 addresses: bech32 (bc1/tb1/bcrt1), P2SH (3/2), P2PKH (1)
+const ONCHAIN_ADDRESS_RE = /^(bc1|tb1|bcrt1|[123])[a-zA-Z0-9]+$/;
+
+function validateArkAddress(address, label = "address") {
+  if (typeof address !== "string" || !ARK_ADDRESS_RE.test(address)) {
+    throw new Error(
+      `${label} must be a valid Ark address (starting with ark1 or tark1), got: ${address}`,
+    );
+  }
+}
+
+function validateOnchainAddress(address, label = "address") {
+  if (typeof address !== "string" || !ONCHAIN_ADDRESS_RE.test(address)) {
+    throw new Error(
+      `${label} must be a valid Bitcoin L1 address (bc1/tb1/bcrt1/1/3), got: ${address}`,
+    );
   }
 }
 
 export class ArkadeAgent {
   #wallet;
+  #legacyWallet;
 
-  constructor(wallet) {
+  constructor(wallet, legacyWallet = null) {
     this.#wallet = wallet;
+    this.#legacyWallet = legacyWallet;
   }
 
   static async create(mnemonic, options = {}) {
@@ -84,26 +120,99 @@ export class ArkadeAgent {
         "Mnemonic is required. Run wallet-setup.js first to generate one.",
       );
     }
-
-    const privateKeyHex = deriveKeyFromMnemonic(mnemonic);
-    const identity = SingleKey.fromHex(privateKeyHex);
-
-    const walletConfig = {
-      identity,
-      arkServerUrl,
-      storage: {
-        walletRepository: new InMemoryWalletRepository(),
-        contractRepository: new InMemoryContractRepository(),
-      },
-    };
-
-    if (delegatorUrl) {
-      walletConfig.delegatorProvider = new RestDelegatorProvider(delegatorUrl);
+    if (!validateMnemonic(mnemonic, wordlist)) {
+      throw new Error(
+        "Invalid BIP39 mnemonic: checksum failed or contains invalid words",
+      );
     }
 
-    const wallet = await Wallet.create(walletConfig);
+    const isMainnet = network === "bitcoin";
+    const storageOpts = () => ({
+      walletRepository: new InMemoryWalletRepository(),
+      contractRepository: new InMemoryContractRepository(),
+    });
 
-    return new ArkadeAgent(wallet);
+    const baseConfig = (identity) => {
+      const config = { identity, arkServerUrl, storage: storageOpts() };
+      if (delegatorUrl) {
+        config.delegatorProvider = new RestDelegatorProvider(delegatorUrl);
+      }
+      return config;
+    };
+
+    // Always use BIP-86 as primary wallet (SDK standard, compatible with NArk/BTCPay)
+    const bip86Identity = MnemonicIdentity.fromMnemonic(mnemonic, { isMainnet });
+    const bip86Wallet = await Wallet.create(baseConfig(bip86Identity));
+
+    // Also check legacy path — funds there need migration, not silent switching
+    const legacyIdentity = SingleKey.fromHex(deriveLegacyKey(mnemonic));
+    const legacyWallet = await Wallet.create(baseConfig(legacyIdentity));
+    const legacyBalance = await legacyWallet.getBalance();
+
+    let legacyRef = null;
+    if (legacyBalance.total > 0n) {
+      legacyRef = legacyWallet;
+      const bip86Address = await bip86Wallet.getAddress();
+      console.warn(
+        "Warning: Funds found under legacy derivation path m/44'/1237'/0'.\n" +
+        `  Legacy balance: ${legacyBalance.total.toString()} sats\n` +
+        "  This path is deprecated and these VTXOs will NOT be auto-renewed.\n" +
+        "  To migrate, call agent.migrateLegacyFunds() or manually send to:\n" +
+        `  ${bip86Address}`
+      );
+    }
+
+    return new ArkadeAgent(bip86Wallet, legacyRef);
+  }
+
+  /**
+   * Check if there are funds stranded on the legacy m/44'/1237'/0' path.
+   * Returns null if no legacy wallet or zero balance.
+   */
+  async getLegacyBalance() {
+    if (!this.#legacyWallet) return null;
+    const balance = await this.#legacyWallet.getBalance();
+    if (balance.total === 0n) return null;
+    return {
+      total: balance.total.toString(),
+      offchain: (balance.offchain || 0n).toString(),
+      onchain: (balance.onchain || 0n).toString(),
+      address: await this.#legacyWallet.getAddress(),
+    };
+  }
+
+  /**
+   * Migrate all funds from the legacy derivation path to the current BIP-86 wallet.
+   * Sends the entire legacy balance to the BIP-86 Ark address via off-chain transfer.
+   */
+  async migrateLegacyFunds() {
+    if (!this.#legacyWallet) {
+      return { migrated: false, reason: "No legacy wallet detected" };
+    }
+    const legacyBalance = await this.#legacyWallet.getBalance();
+    if (legacyBalance.total === 0n) {
+      return { migrated: false, reason: "Legacy wallet has no funds" };
+    }
+
+    const bip86Address = await this.#wallet.getAddress();
+    const amount = Number(legacyBalance.offchain || legacyBalance.total);
+
+    const txid = await this.#legacyWallet.send({
+      address: bip86Address,
+      amount,
+    });
+
+    console.log(
+      `Migrated ${amount} sats from legacy path to BIP-86 wallet: ${txid}`
+    );
+
+    return {
+      migrated: true,
+      txid,
+      amount,
+      fromPath: "m/44'/1237'/0'/0/0",
+      toAddress: bip86Address,
+    };
   }
 
   // --- Identity ---
@@ -146,6 +255,7 @@ export class ArkadeAgent {
   // --- Ark Transfers (off-chain) ---
 
   async transfer(recipientAddress, amountSats) {
+    validateArkAddress(recipientAddress, "recipient address");
     validateAmount(amountSats, "transfer amount");
     return await this.#wallet.send({
       address: recipientAddress,
@@ -156,6 +266,7 @@ export class ArkadeAgent {
   // --- Withdrawal (Collaborative Exit to L1) ---
 
   async withdraw(onchainAddress, amountSats) {
+    validateOnchainAddress(onchainAddress, "withdrawal address");
     validateAmount(amountSats, "withdrawal amount");
     const FEE_PER_OUTPUT = 200; // ASP charges 200 sats per on-chain output
     const DUST_LIMIT = 330; // minimum VTXO amount
@@ -174,7 +285,8 @@ export class ArkadeAgent {
     let selectedAmount = 0;
     for (const vtxo of sorted) {
       selected.push(vtxo);
-      selectedAmount += vtxo.value;
+      // Coerce to Number to handle SDK returning BigInt or number consistently
+      selectedAmount += Number(vtxo.value);
       if (selectedAmount >= minTarget) break;
     }
 
@@ -219,11 +331,11 @@ export class ArkadeAgent {
     if (vtxos.length <= 1)
       return { consolidated: false, reason: "already 1 or 0 VTXOs" };
 
-    const beforeTotal = vtxos.reduce((sum, v) => sum + v.value, 0);
+    const beforeTotal = vtxos.reduce((sum, v) => sum + Number(v.value), 0);
     // settle() with no params merges all VTXOs into one, deducting fees
     const txid = await this.#wallet.settle();
     const afterVtxos = await this.#wallet.getVtxos();
-    const afterTotal = afterVtxos.reduce((sum, v) => sum + v.value, 0);
+    const afterTotal = afterVtxos.reduce((sum, v) => sum + Number(v.value), 0);
 
     return {
       consolidated: true,
@@ -299,11 +411,8 @@ export class ArkadeAgent {
   }
 
   async transferAssets(recipientAddress, assets, amountSats = 0) {
-    if (amountSats < 0 || !Number.isFinite(amountSats)) {
-      throw new Error(
-        `amount must be a non-negative finite number (got ${amountSats})`,
-      );
-    }
+    validateArkAddress(recipientAddress, "recipient address");
+    validateAmount(amountSats, "transfer amount", { allowZero: true });
     if (!assets || !Array.isArray(assets) || assets.length === 0) {
       throw new Error("assets must be a non-empty array");
     }
@@ -382,6 +491,15 @@ async function main() {
     }
   }
 
+  // Check for legacy funds needing migration
+  const legacyBalance = await agent.getLegacyBalance();
+  if (legacyBalance) {
+    console.log("\n=== Legacy Wallet (needs migration) ===");
+    console.log("Legacy balance:", legacyBalance.total, "sats");
+    console.log("Legacy address:", legacyBalance.address);
+    console.log("Run agent.migrateLegacyFunds() to move these to the BIP-86 wallet.");
+  }
+
   // Delegate VTXOs for automatic renewal (free, runs on startup)
   console.log("\n=== Delegation ===");
   try {
@@ -396,9 +514,10 @@ async function main() {
 }
 
 // Only run demo when executed directly (not when imported as a module)
+import { fileURLToPath } from "node:url";
+import { resolve } from "node:path";
 const isDirectRun =
-  import.meta.url === `file://${process.argv[1]}` ||
-  process.argv[1]?.endsWith("arkade-agent.js");
+  resolve(fileURLToPath(import.meta.url)) === resolve(process.argv[1] || "");
 
 if (isDirectRun) {
   main().catch((err) => {

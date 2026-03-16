@@ -157,7 +157,7 @@ Ark is a Bitcoin scaling protocol that uses:
 npm install @arkade-os/sdk@^0.4.4 @scure/bip32 @scure/bip39 @scure/base dotenv eventsource
 ```
 
-Multiple dependencies because key derivation is handled externally (unlike Spark SDK which bundles BIP39 internally).
+The SDK's `MnemonicIdentity` handles BIP-86 derivation for new wallets. The `@scure/bip32` and `@scure/base` libraries are needed for legacy path fallback when importing wallets that may have been created with an older derivation path.
 
 **Node.js polyfill required:** The SDK uses `EventSource` (browser SSE API) internally. In Node.js, you must polyfill it before importing the SDK:
 
@@ -174,33 +174,22 @@ if (typeof globalThis.EventSource === "undefined") {
 ### Step 1: Generate or Import Wallet
 
 ```javascript
-import { Wallet, SingleKey, InMemoryWalletRepository, InMemoryContractRepository } from "@arkade-os/sdk";
+import { Wallet, SingleKey, MnemonicIdentity, RestDelegatorProvider, InMemoryWalletRepository, InMemoryContractRepository } from "@arkade-os/sdk";
 import { generateMnemonic, mnemonicToSeedSync } from "@scure/bip39";
 import { wordlist } from "@scure/bip39/wordlists/english";
 import { HDKey } from "@scure/bip32";
 import { hex } from "@scure/base";
 
-const DERIVATION_PATH = "m/44'/1237'/0'";
-
-function deriveKeyFromMnemonic(mnemonic) {
-  const seed = mnemonicToSeedSync(mnemonic);
-  const master = HDKey.fromMasterSeed(seed);
-  const key = master.derive(DERIVATION_PATH).deriveChild(0).deriveChild(0);
-  return hex.encode(key.privateKey);
-}
-
-// Option A: Generate a new wallet
+// Option A: Generate a new wallet (always BIP-86)
 const mnemonic = generateMnemonic(wordlist);
 // Save mnemonic securely -- NEVER log it in production
 
 // Option B: Import existing wallet from mnemonic
 const mnemonic = process.env.ARK_MNEMONIC;
 
-// Create identity and wallet
-const privateKeyHex = deriveKeyFromMnemonic(mnemonic);
-const identity = SingleKey.fromHex(privateKeyHex);
-
-import { RestDelegatorProvider } from "@arkade-os/sdk";
+// Create identity using BIP-86 derivation (m/86'/0'/0'/0/0)
+// Use { isMainnet: false } for testnet/regtest
+const identity = MnemonicIdentity.fromMnemonic(mnemonic, { isMainnet: true });
 
 const wallet = await Wallet.create({
   identity,
@@ -213,7 +202,18 @@ const wallet = await Wallet.create({
 });
 ```
 
-Note on derivation path: `m/44'/1237'/0'` uses BIP44 with coin type 1237 (Ark). The additional `.deriveChild(0).deriveChild(0)` gives external chain, first address.
+The SDK's `MnemonicIdentity` handles BIP-86 key derivation internally (`m/86'/0'/0'/0/0` for mainnet, `m/86'/1'/0'/0/0` for testnet). This is compatible with NArk, BTCPay Server's Arkade plugin, and the SDK's own recommended approach. For new wallets, always use BIP-86. For imports, use dual-path scanning (see below).
+
+### Wallet Import: Dual-Path Scanning
+
+When importing an existing mnemonic, funds may exist under either of two derivation paths depending on which tool originally created the wallet:
+
+- **BIP-86 (current standard):** `m/86'/0'/0'/0/0` -- used by SDK `MnemonicIdentity`, NArk, BTCPay plugin
+- **Legacy custom path:** `m/44'/1237'/0'/0/0` -- used by older arkade.money wallet and earlier bot versions
+
+The `ArkadeAgent.create()` method always uses BIP-86 as the primary wallet but also checks the legacy path. If legacy funds are detected, it warns the user and makes them available for migration. **It never silently switches to the legacy wallet** -- this prevents "wallet flipping" where the active wallet changes depending on which path has funds.
+
+**Migration:** Call `agent.migrateLegacyFunds()` to automatically send all legacy funds to the BIP-86 wallet via an off-chain Ark transfer. Check `agent.getLegacyBalance()` to see if migration is needed.
 
 ### Step 2: Store Mnemonic
 
@@ -420,7 +420,9 @@ The full `ArkadeAgent` class is in **`examples/arkade-agent.js`** — a single-f
 
 | Method | Description |
 |--------|-------------|
-| `ArkadeAgent.create(mnemonic, options)` | Static factory — sets up wallet with delegation, network defaults |
+| `ArkadeAgent.create(mnemonic, options)` | Static factory — sets up BIP-86 wallet, checks legacy path, warns if migration needed |
+| `getLegacyBalance()` | Check for funds stranded on legacy m/44'/1237'/0' path (null if none) |
+| `migrateLegacyFunds()` | Send all legacy-path funds to the BIP-86 wallet automatically |
 | `getIdentity()` | Ark address + boarding address |
 | `getBalance()` | BTC balance + asset balances with metadata |
 | `getDepositAddress()` | Boarding address for on-chain deposits |
