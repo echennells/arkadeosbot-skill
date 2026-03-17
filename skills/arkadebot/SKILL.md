@@ -213,7 +213,7 @@ When importing an existing mnemonic, funds may exist under either of two derivat
 
 The `ArkadeAgent.create()` method always uses BIP-86 as the primary wallet but also checks the legacy path. If legacy funds are detected, it warns the user and makes them available for migration. **It never silently switches to the legacy wallet** -- this prevents "wallet flipping" where the active wallet changes depending on which path has funds.
 
-**Migration:** Call `agent.migrateLegacyFunds()` to automatically send all legacy funds to the BIP-86 wallet via an off-chain Ark transfer. Check `agent.getLegacyBalance()` to see if migration is needed.
+**Migration:** Call `agent.migrateLegacyFunds()` to automatically send all legacy funds (sats and assets) to the BIP-86 wallet via off-chain Ark transfers. Check `agent.getLegacyBalance()` to see if migration is needed — it reports both sat balances and any assets on the legacy path.
 
 ### Step 2: Store Mnemonic
 
@@ -423,8 +423,8 @@ The full `ArkadeAgent` class is in **`examples/arkade-agent.js`** — a single-f
 | Method | Description |
 |--------|-------------|
 | `ArkadeAgent.create(mnemonic, options)` | Static factory — sets up BIP-86 wallet, checks legacy path, warns if migration needed |
-| `getLegacyBalance()` | Check for funds stranded on legacy m/44'/1237'/0' path (null if none) |
-| `migrateLegacyFunds()` | Send all legacy-path funds to the BIP-86 wallet automatically |
+| `getLegacyBalance()` | Check for funds and assets stranded on legacy m/44'/1237'/0' path (null if none) |
+| `migrateLegacyFunds()` | Send all legacy-path funds and assets to the BIP-86 wallet automatically |
 | `getIdentity()` | Ark address + boarding address |
 | `getBalance()` | BTC balance + asset balances with metadata |
 | `getDepositAddress()` | Boarding address for on-chain deposits |

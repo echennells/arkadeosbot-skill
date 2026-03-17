@@ -150,12 +150,16 @@ export class ArkadeAgent {
     const legacyBalance = await legacyWallet.getBalance();
 
     let legacyRef = null;
-    if (legacyBalance.total > 0n) {
+    const legacyAssets = legacyBalance.assets || [];
+    if (legacyBalance.total > 0n || legacyAssets.length > 0) {
       legacyRef = legacyWallet;
       const bip86Address = await bip86Wallet.getAddress();
+      const assetInfo = legacyAssets.length > 0
+        ? `\n  Legacy assets: ${legacyAssets.length} asset type(s)`
+        : "";
       console.warn(
         "Warning: Funds found under legacy derivation path m/44'/1237'/0'.\n" +
-        `  Legacy balance: ${legacyBalance.total.toString()} sats\n` +
+        `  Legacy balance: ${legacyBalance.total.toString()} sats${assetInfo}\n` +
         "  This path is deprecated and these VTXOs will NOT be auto-renewed.\n" +
         "  To migrate, call agent.migrateLegacyFunds() or manually send to:\n" +
         `  ${bip86Address}`
@@ -172,47 +176,65 @@ export class ArkadeAgent {
   async getLegacyBalance() {
     if (!this.#legacyWallet) return null;
     const balance = await this.#legacyWallet.getBalance();
-    if (balance.total === 0n) return null;
+    const assets = balance.assets || [];
+    if (balance.total === 0n && assets.length === 0) return null;
     return {
       total: balance.total.toString(),
       offchain: (balance.offchain || 0n).toString(),
       onchain: (balance.onchain || 0n).toString(),
+      assets,
       address: await this.#legacyWallet.getAddress(),
     };
   }
 
   /**
-   * Migrate all funds from the legacy derivation path to the current BIP-86 wallet.
-   * Sends the entire legacy balance to the BIP-86 Ark address via off-chain transfer.
+   * Migrate all funds (sats and assets) from the legacy derivation path
+   * to the current BIP-86 wallet via off-chain transfers.
    */
   async migrateLegacyFunds() {
     if (!this.#legacyWallet) {
       return { migrated: false, reason: "No legacy wallet detected" };
     }
     const legacyBalance = await this.#legacyWallet.getBalance();
-    if (legacyBalance.total === 0n) {
-      return { migrated: false, reason: "Legacy wallet has no funds" };
+    const legacyAssets = legacyBalance.assets || [];
+    if (legacyBalance.total === 0n && legacyAssets.length === 0) {
+      return { migrated: false, reason: "Legacy wallet has no funds or assets" };
     }
 
     const bip86Address = await this.#wallet.getAddress();
-    const amount = Number(legacyBalance.offchain || legacyBalance.total);
+    const results = { migrated: true, fromPath: "m/44'/1237'/0'/0/0", toAddress: bip86Address };
 
-    const txid = await this.#legacyWallet.send({
-      address: bip86Address,
-      amount,
-    });
+    // Migrate sats
+    if (legacyBalance.total > 0n) {
+      const amount = Number(legacyBalance.offchain || legacyBalance.total);
+      const txid = await this.#legacyWallet.send({
+        address: bip86Address,
+        amount,
+      });
+      results.satsTxid = txid;
+      results.satsAmount = amount;
+      console.log(
+        `Migrated ${amount} sats from legacy path to BIP-86 wallet: ${txid}`
+      );
+    }
 
-    console.log(
-      `Migrated ${amount} sats from legacy path to BIP-86 wallet: ${txid}`
-    );
+    // Migrate assets
+    if (legacyAssets.length > 0) {
+      results.assets = [];
+      for (const asset of legacyAssets) {
+        const txid = await this.#legacyWallet.send({
+          address: bip86Address,
+          amount: 0,
+          assets: [{ assetId: asset.assetId, amount: asset.amount }],
+        });
+        results.assets.push({ assetId: asset.assetId, amount: asset.amount, txid });
+        console.log(
+          `Migrated asset ${asset.assetId} (amount: ${asset.amount}) from legacy path: ${txid}`
+        );
+      }
+    }
 
-    return {
-      migrated: true,
-      txid,
-      amount,
-      fromPath: "m/44'/1237'/0'/0/0",
-      toAddress: bip86Address,
-    };
+    return results;
   }
 
   // --- Identity ---
