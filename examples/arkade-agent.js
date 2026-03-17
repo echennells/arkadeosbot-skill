@@ -89,13 +89,27 @@ function validateOnchainAddress(address, label = "address") {
   }
 }
 
+const DEFAULT_GAP_LIMIT = 20;
+
 export class ArkadeAgent {
   #wallet;
   #legacyWallet;
+  #indexWallets = new Map(); // Map<number, Wallet> for funds at rotated HD indexes
+  #scanned = false;
+  #mnemonic;
+  #arkServerUrl;
+  #delegatorUrl;
+  #isMainnet;
 
-  constructor(wallet, legacyWallet = null) {
+  constructor(wallet, legacyWallet, config) {
     this.#wallet = wallet;
-    this.#legacyWallet = legacyWallet;
+    this.#legacyWallet = legacyWallet || null;
+    if (config) {
+      this.#mnemonic = config.mnemonic;
+      this.#arkServerUrl = config.arkServerUrl;
+      this.#delegatorUrl = config.delegatorUrl;
+      this.#isMainnet = config.isMainnet;
+    }
   }
 
   static async create(mnemonic, options = {}) {
@@ -166,7 +180,196 @@ export class ArkadeAgent {
       );
     }
 
-    return new ArkadeAgent(bip86Wallet, legacyRef);
+    const config = { mnemonic, arkServerUrl, delegatorUrl, isMainnet };
+    const agent = new ArkadeAgent(bip86Wallet, legacyRef, config);
+
+    if (options.scan) {
+      await agent.scanIndexes();
+    }
+
+    return agent;
+  }
+
+  /**
+   * Derive a BIP-86 private key at a specific child index.
+   * Path: m/86'/0'/0'/0/{index} (mainnet) or m/86'/1'/0'/0/{index} (testnet)
+   */
+  #deriveKeyAtIndex(index) {
+    const seed = mnemonicToSeedSync(this.#mnemonic);
+    const master = HDKey.fromMasterSeed(seed);
+    const coinType = this.#isMainnet ? 0 : 1;
+    const child = master.derive(`m/86'/${coinType}'/0'`).deriveChild(0).deriveChild(index);
+    return hex.encode(child.privateKey);
+  }
+
+  /**
+   * Create a Wallet instance from a raw private key hex string.
+   */
+  async #createWalletForKey(privateKeyHex) {
+    const identity = SingleKey.fromHex(privateKeyHex);
+    const config = {
+      identity,
+      arkServerUrl: this.#arkServerUrl,
+      storage: {
+        walletRepository: new InMemoryWalletRepository(),
+        contractRepository: new InMemoryContractRepository(),
+      },
+    };
+    if (this.#delegatorUrl) {
+      config.delegatorProvider = new RestDelegatorProvider(this.#delegatorUrl);
+    }
+    return await Wallet.create(config);
+  }
+
+  /**
+   * Scan BIP-86 child indexes for funds at rotated HD positions.
+   *
+   * The Ark SDK rotates HD indexes during round participation. With
+   * InMemoryWalletRepository (stateless), only index 0 is visible.
+   * This method scans higher indexes to find stranded funds.
+   *
+   * Each index requires a network round-trip (~200-500ms). Scanning
+   * stops after `gapLimit` consecutive empty indexes (default: 20).
+   *
+   * @param {object} options
+   * @param {number} options.gapLimit - Stop after this many consecutive empty indexes (default: 20)
+   * @param {function} options.onProgress - Called with (index, balance) for each checked index
+   * @returns {object} Scan summary with fundedIndexes, totalSats, assets
+   */
+  async scanIndexes(options = {}) {
+    if (!this.#mnemonic) {
+      throw new Error("Cannot scan: mnemonic not available (wallet was created without config)");
+    }
+
+    const gapLimit = options.gapLimit || DEFAULT_GAP_LIMIT;
+    this.#indexWallets.clear();
+
+    let consecutiveEmpty = 0;
+    let index = 0;
+    let totalSats = 0n;
+    const fundedIndexes = [];
+    const assetTotals = new Map();
+
+    while (consecutiveEmpty < gapLimit) {
+      let wallet;
+      let balance;
+
+      if (index === 0) {
+        // Index 0 is the primary wallet (MnemonicIdentity with delegation)
+        balance = await this.#wallet.getBalance();
+      } else {
+        const keyHex = this.#deriveKeyAtIndex(index);
+        wallet = await this.#createWalletForKey(keyHex);
+        balance = await wallet.getBalance();
+      }
+
+      const sats = balance.total || 0n;
+      const assets = balance.assets || [];
+      const hasFunds = sats > 0n || assets.length > 0;
+
+      if (hasFunds) {
+        if (index > 0) {
+          this.#indexWallets.set(index, wallet);
+        }
+        fundedIndexes.push({ index, sats: sats.toString(), assets });
+        totalSats += sats;
+        consecutiveEmpty = 0;
+
+        for (const a of assets) {
+          const prev = assetTotals.get(a.assetId) || 0;
+          assetTotals.set(a.assetId, prev + (a.amount || 0));
+        }
+      } else {
+        consecutiveEmpty++;
+      }
+
+      if (options.onProgress) {
+        options.onProgress(index, { sats: sats.toString(), assets });
+      }
+
+      index++;
+    }
+
+    this.#scanned = true;
+
+    const result = {
+      scanned: true,
+      indexesChecked: index,
+      fundedIndexes,
+      totalSats: totalSats.toString(),
+      assets: [...assetTotals.entries()].map(([assetId, amount]) => ({ assetId, amount })),
+    };
+
+    if (fundedIndexes.length > 0) {
+      const nonZeroIndexes = fundedIndexes.filter(f => f.index > 0);
+      if (nonZeroIndexes.length > 0) {
+        const primaryAddr = await this.#wallet.getAddress();
+        console.warn(
+          `Found funds at ${nonZeroIndexes.length} rotated HD index(es): ${nonZeroIndexes.map(f => f.index).join(", ")}.\n` +
+          "  These funds are at higher derivation indexes from prior round participation.\n" +
+          "  Call agent.migrateIndexFunds() to consolidate to the primary wallet:\n" +
+          `  ${primaryAddr}`
+        );
+      }
+    }
+
+    return result;
+  }
+
+  /**
+   * Migrate all funds from rotated HD indexes to the primary wallet (index 0).
+   * Requires scanIndexes() to have been called first.
+   * Each index wallet sends its funds via off-chain Ark transfer.
+   */
+  async migrateIndexFunds() {
+    if (!this.#scanned) {
+      throw new Error("Call scanIndexes() before migrateIndexFunds()");
+    }
+    if (this.#indexWallets.size === 0) {
+      return { migrated: false, reason: "No funds at rotated indexes" };
+    }
+
+    const primaryAddr = await this.#wallet.getAddress();
+    const results = {
+      migrated: true,
+      toAddress: primaryAddr,
+      indexes: [],
+    };
+
+    for (const [index, indexWallet] of this.#indexWallets) {
+      const balance = await indexWallet.getBalance();
+      const assets = balance.assets || [];
+      const entry = { index, sats: 0, assets: [], txids: [] };
+
+      // Migrate sats
+      if (balance.total > 0n) {
+        const amount = Number(balance.offchain || balance.total);
+        const txid = await indexWallet.send({
+          address: primaryAddr,
+          amount,
+        });
+        entry.sats = amount;
+        entry.txids.push(txid);
+        console.log(`Migrated ${amount} sats from index ${index}: ${txid}`);
+      }
+
+      // Migrate assets
+      for (const asset of assets) {
+        const txid = await indexWallet.send({
+          address: primaryAddr,
+          amount: 0,
+          assets: [{ assetId: asset.assetId, amount: asset.amount }],
+        });
+        entry.assets.push({ assetId: asset.assetId, amount: asset.amount });
+        entry.txids.push(txid);
+        console.log(`Migrated asset ${asset.assetId} from index ${index}: ${txid}`);
+      }
+
+      results.indexes.push(entry);
+    }
+
+    this.#indexWallets.clear();
+    return results;
   }
 
   /**
@@ -483,6 +686,16 @@ async function main() {
   console.log("=== Agent Identity ===");
   console.log("Ark Address:     ", identity.address);
   console.log("Boarding Address:", identity.boardingAddress);
+
+  // Scan for funds at rotated HD indexes (important for imported mnemonics)
+  console.log("\n=== HD Index Scan ===");
+  const scan = await agent.scanIndexes();
+  console.log(`Checked ${scan.indexesChecked} indexes, found funds at: ${scan.fundedIndexes.map(f => f.index).join(", ") || "none"}`);
+  console.log(`Total across all indexes: ${scan.totalSats} sats`);
+
+  if (scan.fundedIndexes.some(f => f.index > 0)) {
+    console.log("Run agent.migrateIndexFunds() to consolidate to the primary wallet.");
+  }
 
   const balance = await agent.getBalance();
   console.log("\n=== Balance ===");

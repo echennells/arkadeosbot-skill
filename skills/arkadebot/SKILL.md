@@ -215,6 +215,44 @@ The `ArkadeAgent.create()` method always uses BIP-86 as the primary wallet but a
 
 **Migration:** Call `agent.migrateLegacyFunds()` to automatically send all legacy funds (sats and assets) to the BIP-86 wallet via off-chain Ark transfers. Check `agent.getLegacyBalance()` to see if migration is needed — it reports both sat balances and any assets on the legacy path.
 
+### Wallet Import: HD Index Scanning -- Critical for Imported Mnemonics
+
+**Problem:** The Arkade SDK uses HD key derivation to generate a sequence of contract scripts at indexes 0, 1, 2, 3, etc. Each time a wallet receives funds or participates in a round, the SDK may rotate to the next index. The taproot script at each index is deterministic (user pubkey at that index + ASP server pubkey + CSV timelock). With `InMemoryWalletRepository` (stateless), the SDK only derives index 0 and queries the operator for VTXOs matching that single script. Funds at higher indexes are invisible.
+
+Unlike on-chain BIP-44/84/86 wallets which do gap-limit address discovery, the Ark SDK assumes persisted state will track which indexes have been used. With in-memory storage there's no persisted state, so previously-used wallets appear to have zero balance.
+
+**Solution:** Call `agent.scanIndexes()` after creating an agent from an imported mnemonic. This:
+
+1. Derives the user's x-only pubkey at each BIP-86 child index (`m/86'/0'/0'/0/{index}`)
+2. Creates a `SingleKey` wallet at each index and queries the operator for VTXOs
+3. Stops after 20 consecutive empty indexes (standard gap limit)
+4. Stores funded index wallets for balance aggregation and migration
+
+**Spending limitation:** The primary wallet (MnemonicIdentity) signs with the index 0 key. It cannot sign for VTXOs at other indexes. The agent creates separate `SingleKey` wallet instances for each funded index, which can sign their own transactions. Call `agent.migrateIndexFunds()` to send all rotated-index funds to the primary wallet (index 0) via off-chain transfers.
+
+**Usage:**
+
+```javascript
+// For imported mnemonics, always scan
+const agent = await ArkadeAgent.create(mnemonic);
+const scan = await agent.scanIndexes();
+console.log(`Found funds at indexes: ${scan.fundedIndexes.map(f => f.index).join(", ")}`);
+console.log(`Total: ${scan.totalSats} sats`);
+
+// Consolidate to primary wallet
+if (scan.fundedIndexes.some(f => f.index > 0)) {
+  const result = await agent.migrateIndexFunds();
+  console.log(`Migrated from ${result.indexes.length} indexes`);
+}
+
+// Or use the convenience option:
+const agent = await ArkadeAgent.create(mnemonic, { scan: true });
+```
+
+**Performance:** Each index check requires a `Wallet.create()` + `getBalance()` network round-trip (~200-500ms). Scanning 20 empty indexes takes several seconds. Only scan when importing an existing mnemonic -- for freshly generated mnemonics it is unnecessary.
+
+**When to scan:** Scan if the mnemonic was previously used with Arkade (via the web wallet, another agent, NArk, etc.). If `getBalance()` returns 0 but you expect funds, scanning will find them. After migration, all funds are at index 0 and future operations work normally.
+
 ### Step 2: Store Mnemonic
 
 Add to your project's `.env`:
@@ -422,7 +460,9 @@ The full `ArkadeAgent` class is in **`examples/arkade-agent.js`** — a single-f
 
 | Method | Description |
 |--------|-------------|
-| `ArkadeAgent.create(mnemonic, options)` | Static factory — sets up BIP-86 wallet, checks legacy path, warns if migration needed |
+| `ArkadeAgent.create(mnemonic, options)` | Static factory — sets up BIP-86 wallet, checks legacy path. Pass `{ scan: true }` to auto-scan HD indexes |
+| `scanIndexes(options?)` | Scan BIP-86 child indexes for funds at rotated HD positions. Options: `{ gapLimit, onProgress }` |
+| `migrateIndexFunds()` | Send all rotated-index funds to the primary wallet (index 0) via off-chain transfers |
 | `getLegacyBalance()` | Check for funds and assets stranded on legacy m/44'/1237'/0' path (null if none) |
 | `migrateLegacyFunds()` | Send all legacy-path funds and assets to the BIP-86 wallet automatically |
 | `getIdentity()` | Ark address + boarding address |
@@ -453,6 +493,13 @@ If you need Lightning, consider [sparkbtcbot-skill](https://github.com/echennell
 import { ArkadeAgent } from "./examples/arkade-agent.js";
 
 const agent = await ArkadeAgent.create(process.env.ARK_MNEMONIC);
+
+// For imported mnemonics: scan for funds at rotated HD indexes
+const scan = await agent.scanIndexes();
+if (scan.fundedIndexes.some(f => f.index > 0)) {
+  await agent.migrateIndexFunds(); // consolidate to primary wallet
+}
+
 const { address } = await agent.getIdentity();
 const { total } = await agent.getBalance();
 
