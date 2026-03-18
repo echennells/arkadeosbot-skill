@@ -94,7 +94,7 @@ const DEFAULT_GAP_LIMIT = 20;
 export class ArkadeAgent {
   #wallet;
   #legacyWallet;
-  #indexWallets = new Map(); // Map<number, Wallet> for funds at rotated HD indexes
+  #indexWallets = new Map(); // Map<string, Wallet> keyed as "{index}:delegate" or "{index}:no-delegate"
   #scanned = false;
   #mnemonic;
   #arkServerUrl;
@@ -204,8 +204,11 @@ export class ArkadeAgent {
 
   /**
    * Create a Wallet instance from a raw private key hex string.
+   * @param {string} privateKeyHex
+   * @param {object} options
+   * @param {boolean} options.withDelegation - Include delegator provider (default: use agent config)
    */
-  async #createWalletForKey(privateKeyHex) {
+  async #createWalletForKey(privateKeyHex, { withDelegation = true } = {}) {
     const identity = SingleKey.fromHex(privateKeyHex);
     const config = {
       identity,
@@ -215,7 +218,7 @@ export class ArkadeAgent {
         contractRepository: new InMemoryContractRepository(),
       },
     };
-    if (this.#delegatorUrl) {
+    if (withDelegation && this.#delegatorUrl) {
       config.delegatorProvider = new RestDelegatorProvider(this.#delegatorUrl);
     }
     return await Wallet.create(config);
@@ -250,7 +253,18 @@ export class ArkadeAgent {
     const fundedIndexes = [];
     const assetTotals = new Map();
 
+    // When delegation is configured, we need to scan both script variants at
+    // each index: delegate scripts (with delegatorProvider) and non-delegate
+    // scripts (without). VTXOs may exist under either variant depending on
+    // whether delegation was active when the wallet participated in a round.
+    const hasDelegation = !!this.#delegatorUrl;
+
     while (consecutiveEmpty < gapLimit) {
+      const keyHex = index > 0 ? this.#deriveKeyAtIndex(index) : null;
+      let indexHasFunds = false;
+
+      // Check primary variant (with delegation if configured)
+      const primaryVariant = hasDelegation ? "delegate" : "default";
       let wallet;
       let balance;
 
@@ -258,27 +272,58 @@ export class ArkadeAgent {
         // Index 0 is the primary wallet (MnemonicIdentity with delegation)
         balance = await this.#wallet.getBalance();
       } else {
-        const keyHex = this.#deriveKeyAtIndex(index);
         wallet = await this.#createWalletForKey(keyHex);
         balance = await wallet.getBalance();
       }
 
-      const sats = balance.total || 0n;
-      const assets = balance.assets || [];
-      const hasFunds = sats > 0n || assets.length > 0;
+      let sats = balance.total || 0n;
+      let assets = balance.assets || [];
 
-      if (hasFunds) {
+      if (sats > 0n || assets.length > 0) {
         if (index > 0) {
-          this.#indexWallets.set(index, wallet);
+          this.#indexWallets.set(`${index}:${primaryVariant}`, wallet);
         }
-        fundedIndexes.push({ index, sats: sats.toString(), assets });
+        fundedIndexes.push({ index, variant: primaryVariant, sats: sats.toString(), assets });
         totalSats += sats;
-        consecutiveEmpty = 0;
-
+        indexHasFunds = true;
         for (const a of assets) {
           const prev = assetTotals.get(a.assetId) || 0;
           assetTotals.set(a.assetId, prev + (a.amount || 0));
         }
+      }
+
+      // Check non-delegate variant (only when delegation is configured)
+      if (hasDelegation) {
+        let ndWallet;
+        let ndBalance;
+
+        if (index === 0) {
+          // Create a separate non-delegate wallet at index 0 to check
+          const idx0Key = this.#deriveKeyAtIndex(0);
+          ndWallet = await this.#createWalletForKey(idx0Key, { withDelegation: false });
+          ndBalance = await ndWallet.getBalance();
+        } else {
+          ndWallet = await this.#createWalletForKey(keyHex, { withDelegation: false });
+          ndBalance = await ndWallet.getBalance();
+        }
+
+        const ndSats = ndBalance.total || 0n;
+        const ndAssets = ndBalance.assets || [];
+
+        if (ndSats > 0n || ndAssets.length > 0) {
+          this.#indexWallets.set(`${index}:no-delegate`, ndWallet);
+          fundedIndexes.push({ index, variant: "no-delegate", sats: ndSats.toString(), assets: ndAssets });
+          totalSats += ndSats;
+          indexHasFunds = true;
+          for (const a of ndAssets) {
+            const prev = assetTotals.get(a.assetId) || 0;
+            assetTotals.set(a.assetId, prev + (a.amount || 0));
+          }
+        }
+      }
+
+      if (indexHasFunds) {
+        consecutiveEmpty = 0;
       } else {
         consecutiveEmpty++;
       }
@@ -300,17 +345,18 @@ export class ArkadeAgent {
       assets: [...assetTotals.entries()].map(([assetId, amount]) => ({ assetId, amount })),
     };
 
-    if (fundedIndexes.length > 0) {
-      const nonZeroIndexes = fundedIndexes.filter(f => f.index > 0);
-      if (nonZeroIndexes.length > 0) {
-        const primaryAddr = await this.#wallet.getAddress();
-        console.warn(
-          `Found funds at ${nonZeroIndexes.length} rotated HD index(es): ${nonZeroIndexes.map(f => f.index).join(", ")}.\n` +
-          "  These funds are at higher derivation indexes from prior round participation.\n" +
-          "  Call agent.migrateIndexFunds() to consolidate to the primary wallet:\n" +
-          `  ${primaryAddr}`
-        );
-      }
+    // Warn about funds that need migration (anything not at index 0 delegate variant)
+    const migratable = fundedIndexes.filter(
+      f => f.index > 0 || f.variant === "no-delegate"
+    );
+    if (migratable.length > 0) {
+      const primaryAddr = await this.#wallet.getAddress();
+      const labels = migratable.map(f => `${f.index}(${f.variant})`);
+      console.warn(
+        `Found funds at ${migratable.length} non-primary location(s): ${labels.join(", ")}.\n` +
+        "  Call agent.migrateIndexFunds() to consolidate to the primary wallet:\n" +
+        `  ${primaryAddr}`
+      );
     }
 
     return result;
@@ -333,13 +379,13 @@ export class ArkadeAgent {
     const results = {
       migrated: true,
       toAddress: primaryAddr,
-      indexes: [],
+      entries: [],
     };
 
-    for (const [index, indexWallet] of this.#indexWallets) {
+    for (const [key, indexWallet] of this.#indexWallets) {
       const balance = await indexWallet.getBalance();
       const assets = balance.assets || [];
-      const entry = { index, sats: 0, assets: [], txids: [] };
+      const entry = { key, sats: 0, assets: [], txids: [] };
 
       // Migrate sats
       if (balance.total > 0n) {
@@ -350,7 +396,7 @@ export class ArkadeAgent {
         });
         entry.sats = amount;
         entry.txids.push(txid);
-        console.log(`Migrated ${amount} sats from index ${index}: ${txid}`);
+        console.log(`Migrated ${amount} sats from ${key}: ${txid}`);
       }
 
       // Migrate assets
@@ -362,10 +408,10 @@ export class ArkadeAgent {
         });
         entry.assets.push({ assetId: asset.assetId, amount: asset.amount });
         entry.txids.push(txid);
-        console.log(`Migrated asset ${asset.assetId} from index ${index}: ${txid}`);
+        console.log(`Migrated asset ${asset.assetId} from ${key}: ${txid}`);
       }
 
-      results.indexes.push(entry);
+      results.entries.push(entry);
     }
 
     this.#indexWallets.clear();
@@ -690,10 +736,10 @@ async function main() {
   // Scan for funds at rotated HD indexes (important for imported mnemonics)
   console.log("\n=== HD Index Scan ===");
   const scan = await agent.scanIndexes();
-  console.log(`Checked ${scan.indexesChecked} indexes, found funds at: ${scan.fundedIndexes.map(f => f.index).join(", ") || "none"}`);
+  console.log(`Checked ${scan.indexesChecked} indexes, found funds at: ${scan.fundedIndexes.map(f => `${f.index}(${f.variant})`).join(", ") || "none"}`);
   console.log(`Total across all indexes: ${scan.totalSats} sats`);
 
-  if (scan.fundedIndexes.some(f => f.index > 0)) {
+  if (scan.fundedIndexes.some(f => f.index > 0 || f.variant === "no-delegate")) {
     console.log("Run agent.migrateIndexFunds() to consolidate to the primary wallet.");
   }
 

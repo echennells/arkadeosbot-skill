@@ -225,10 +225,13 @@ Unlike on-chain BIP-44/84/86 wallets which do gap-limit address discovery, the A
 
 1. Derives the user's x-only pubkey at each BIP-86 child index (`m/86'/0'/0'/0/{index}`)
 2. Creates a `SingleKey` wallet at each index and queries the operator for VTXOs
-3. Stops after 20 consecutive empty indexes (standard gap limit)
-4. Stores funded index wallets for balance aggregation and migration
+3. **When delegation is configured**, checks both delegate and non-delegate script variants at each index — VTXOs may exist under either depending on whether delegation was active when the wallet participated in a round
+4. Stops after 20 consecutive empty indexes (standard gap limit)
+5. Stores funded index wallets for balance aggregation and migration
 
-**Spending limitation:** The primary wallet (MnemonicIdentity) signs with the index 0 key. It cannot sign for VTXOs at other indexes. The agent creates separate `SingleKey` wallet instances for each funded index, which can sign their own transactions. Call `agent.migrateIndexFunds()` to send all rotated-index funds to the primary wallet (index 0) via off-chain transfers.
+**Spending limitation:** The primary wallet (MnemonicIdentity) signs with the index 0 key. It cannot sign for VTXOs at other indexes. The agent creates separate `SingleKey` wallet instances for each funded index/variant, which can sign their own transactions. Call `agent.migrateIndexFunds()` to send all rotated-index funds to the primary wallet (index 0) via off-chain transfers.
+
+**Delegation awareness:** A wallet's taproot script differs depending on whether a delegator provider was configured. If the mnemonic was used across different clients (some with delegation, some without), funds may be split across both script variants at the same index. The scanner handles this automatically — each funded entry in the results includes a `variant` field (`"delegate"` or `"no-delegate"`).
 
 **Usage:**
 
@@ -236,20 +239,20 @@ Unlike on-chain BIP-44/84/86 wallets which do gap-limit address discovery, the A
 // For imported mnemonics, always scan
 const agent = await ArkadeAgent.create(mnemonic);
 const scan = await agent.scanIndexes();
-console.log(`Found funds at indexes: ${scan.fundedIndexes.map(f => f.index).join(", ")}`);
+console.log(`Found funds at: ${scan.fundedIndexes.map(f => `${f.index}(${f.variant})`).join(", ")}`);
 console.log(`Total: ${scan.totalSats} sats`);
 
 // Consolidate to primary wallet
-if (scan.fundedIndexes.some(f => f.index > 0)) {
+if (scan.fundedIndexes.some(f => f.index > 0 || f.variant === "no-delegate")) {
   const result = await agent.migrateIndexFunds();
-  console.log(`Migrated from ${result.indexes.length} indexes`);
+  console.log(`Migrated from ${result.entries.length} locations`);
 }
 
 // Or use the convenience option:
 const agent = await ArkadeAgent.create(mnemonic, { scan: true });
 ```
 
-**Performance:** Each index check requires a `Wallet.create()` + `getBalance()` network round-trip (~200-500ms). Scanning 20 empty indexes takes several seconds. Only scan when importing an existing mnemonic -- for freshly generated mnemonics it is unnecessary.
+**Performance:** Each index check requires a `Wallet.create()` + `getBalance()` network round-trip (~200-500ms). When delegation is configured, each index requires two checks (delegate + non-delegate), doubling scan time. Scanning 20 empty indexes takes several seconds. Only scan when importing an existing mnemonic -- for freshly generated mnemonics it is unnecessary.
 
 **When to scan:** Scan if the mnemonic was previously used with Arkade (via the web wallet, another agent, NArk, etc.). If `getBalance()` returns 0 but you expect funds, scanning will find them. After migration, all funds are at index 0 and future operations work normally.
 
@@ -461,7 +464,7 @@ The full `ArkadeAgent` class is in **`examples/arkade-agent.js`** — a single-f
 | Method | Description |
 |--------|-------------|
 | `ArkadeAgent.create(mnemonic, options)` | Static factory — sets up BIP-86 wallet, checks legacy path. Pass `{ scan: true }` to auto-scan HD indexes |
-| `scanIndexes(options?)` | Scan BIP-86 child indexes for funds at rotated HD positions. Options: `{ gapLimit, onProgress }` |
+| `scanIndexes(options?)` | Scan BIP-86 child indexes for funds at rotated HD positions. Checks both delegate and non-delegate script variants when delegation is configured. Options: `{ gapLimit, onProgress }` |
 | `migrateIndexFunds()` | Send all rotated-index funds to the primary wallet (index 0) via off-chain transfers |
 | `getLegacyBalance()` | Check for funds and assets stranded on legacy m/44'/1237'/0' path (null if none) |
 | `migrateLegacyFunds()` | Send all legacy-path funds and assets to the BIP-86 wallet automatically |
@@ -496,7 +499,7 @@ const agent = await ArkadeAgent.create(process.env.ARK_MNEMONIC);
 
 // For imported mnemonics: scan for funds at rotated HD indexes
 const scan = await agent.scanIndexes();
-if (scan.fundedIndexes.some(f => f.index > 0)) {
+if (scan.fundedIndexes.some(f => f.index > 0 || f.variant === "no-delegate")) {
   await agent.migrateIndexFunds(); // consolidate to primary wallet
 }
 
