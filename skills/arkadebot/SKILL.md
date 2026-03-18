@@ -461,26 +461,15 @@ const pubkey = hex.encode(new Uint8Array(await wallet.identity.compressedPublicK
 
 The full `ArkadeAgent` class is in **`examples/arkade-agent.js`** — a single-file, production-ready agent with all capabilities:
 
-| Method | Description |
-|--------|-------------|
+| Method / Property | Description |
+|-------------------|-------------|
 | `ArkadeAgent.create(mnemonic, options)` | Static factory — sets up BIP-86 wallet, checks legacy path. Pass `{ scan: true }` to auto-scan HD indexes |
+| `agent.wallet` | The underlying `Wallet` instance — use directly for SDK operations (`send`, `settle`, `getBalance`, `getVtxos`, `getAddress`, `getBoardingAddress`, etc.) |
 | `scanIndexes(options?)` | Scan BIP-86 child indexes for funds at rotated HD positions. Checks both delegate and non-delegate script variants when delegation is configured. Options: `{ gapLimit, onProgress }` |
 | `migrateIndexFunds()` | Send all rotated-index funds to the primary wallet (index 0) via off-chain transfers |
 | `getLegacyBalance()` | Check for funds and assets stranded on legacy m/44'/1237'/0' path (null if none) |
 | `migrateLegacyFunds()` | Send all legacy-path funds and assets to the BIP-86 wallet automatically |
-| `getIdentity()` | Ark address + boarding address |
-| `getBalance()` | BTC balance + asset balances with metadata |
-| `getDepositAddress()` | Boarding address for on-chain deposits |
-| `transfer(address, amount)` | Off-chain Ark-to-Ark transfer |
-| `withdraw(onchainAddress, amount)` | Collaborative exit to L1 (200 sat fee per on-chain output) |
-| `consolidateVtxos()` | Merge multiple VTXOs into one |
-| `delegateVtxos()` | Register VTXOs for automatic renewal |
-| `renewVtxos(thresholdMs)` | Manual renewal fallback |
-| `getVtxoStatus()` | VTXO expiry details |
-| `transferAssets(address, assets, amount)` | Send Arkade Assets |
-| `getAssetDetails(assetId)` | Asset metadata |
-| `signMessage(text)` | Schnorr signature for identity proof |
-| `getTransactionHistory()` | Transaction log |
+| `delegateVtxos()` | Register VTXOs for automatic renewal via the delegator service |
 
 **Lightning is not included.** Arkade supports Lightning via Boltz Exchange swaps (`@arkade-os/boltz-swap`), but the swap lifecycle is stateful and not suitable for an agent skill:
 
@@ -503,8 +492,11 @@ if (scan.fundedIndexes.some(f => f.index > 0 || f.variant === "no-delegate")) {
   await agent.migrateIndexFunds(); // consolidate to primary wallet
 }
 
-const { address } = await agent.getIdentity();
-const { total } = await agent.getBalance();
+const address = await agent.wallet.getAddress();
+const balance = await agent.wallet.getBalance();
+
+// Use the SDK wallet directly for transfers, withdrawals, etc.
+await agent.wallet.send({ address: "ark1...", amount: 1000 });
 
 // Delegate VTXOs on startup (recommended)
 await agent.delegateVtxos();
